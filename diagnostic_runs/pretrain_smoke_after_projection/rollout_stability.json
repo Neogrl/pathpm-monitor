@@ -1,0 +1,16 @@
+{
+  "episodes": 2,
+  "steps": 5,
+  "replay_size": 10,
+  "failure_count": 0,
+  "failures": [],
+  "mean_episode_reward": -0.2871395776691227,
+  "mean_discovery_rate": 0.0,
+  "mean_valid_candidates": 8.0,
+  "mean_target_node_count": 0.6,
+  "mean_search_node_count": 10.9,
+  "mean_maintenance_node_count": 5.4,
+  "mean_selected_target_rate": 0.03333333333333333,
+  "mean_selected_search_rate": 0.39999999999999997,
+  "mean_selected_maintenance_rate": 0.2
+}

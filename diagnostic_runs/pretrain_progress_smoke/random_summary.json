@@ -1,0 +1,22 @@
+{
+  "OSPA": 25.0,
+  "cardinality_error": 4.76837158203125e-07,
+  "discovery_rate": 0.20000000298023224,
+  "episode_index": 0.0,
+  "episode_reward": 4.174956798553467,
+  "estimated_count": 4.999999523162842,
+  "estimated_peak_count": 0.0,
+  "fairness": 1.0,
+  "max_observation_gap": 1.0,
+  "mean_first_detection_time": 0.0,
+  "mean_observation_gap": 0.0,
+  "mean_reward": 0.8349913358688354,
+  "miss_violation_rate": 0.0,
+  "observation_rate": 0.1599999964237213,
+  "overlap_penalty": 0.0,
+  "steps": 5.0,
+  "true_target_count": 5.0,
+  "episodes": 1,
+  "seed": 900,
+  "mode": "random"
+}

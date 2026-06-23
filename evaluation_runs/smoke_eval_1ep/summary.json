@@ -1,0 +1,16 @@
+{
+  "mean_reward": -0.25871366262435913,
+  "discovery_rate": 0.0,
+  "mean_first_detection_time": NaN,
+  "observation_rate": 0.0,
+  "fairness": 0.0,
+  "max_observation_gap": 0.0,
+  "miss_violation_rate": 0.0,
+  "overlap_penalty": 0.65753573179245,
+  "cardinality_error": 1.0,
+  "OSPA": 0.0,
+  "episode_reward": -15.522818565368652,
+  "steps": 60.0,
+  "episodes": 1,
+  "seed": 501
+}
