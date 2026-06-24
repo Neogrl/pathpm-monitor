@@ -1,2 +1,0 @@
-OSPA,cardinality_error,discovery_rate,episode_index,episode_reward,estimated_count,estimated_peak_count,fairness,max_observation_gap,mean_first_detection_time,mean_observation_gap,mean_reward,miss_violation_rate,mode,observation_rate,overlap_penalty,steps,true_target_count
-25.0,4.76837158203125e-07,0.2,0,4.174956784248352,4.999999523162842,0.0,1.0,1.0,0.0,0.0,0.8349913568496705,0.0,random,0.16,0.0,5,5.0

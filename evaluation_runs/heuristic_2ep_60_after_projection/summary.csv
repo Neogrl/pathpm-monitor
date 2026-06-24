@@ -1,2 +1,0 @@
-mean_reward,discovery_rate,mean_first_detection_time,observation_rate,fairness,max_observation_gap,mean_observation_gap,miss_violation_rate,overlap_penalty,cardinality_error,estimated_count,estimated_peak_count,true_target_count,OSPA,episode_reward,steps,episodes,seed
-0.39062565565109253,1.0,14.699999809265137,0.2316666692495346,0.313493549823761,51.0,19.399999618530273,0.5,0.01011559646576643,1.000000238418579,6.0,0.5,5.0,23.26329803466797,23.43754005432129,60.0,2,600
