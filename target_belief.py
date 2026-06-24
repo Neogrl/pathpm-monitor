@@ -54,19 +54,27 @@ class TargetBelief:
         self.weights[idx] += self.cfg.birth_rate / n_birth
 
     def update(self, measurements: np.ndarray, uav_positions: np.ndarray) -> None:
-        if len(measurements) == 0:
-            self.weights *= 0.97
-            self._renormalize(max_total=max(self.cfg.phd_prior_count * 1.5, 1.0))
-            return
-        likelihood = np.zeros_like(self.weights)
-        for z in measurements:
-            dist2 = np.sum((self.particles[:, 0:2] - z[None, :]) ** 2, axis=1)
-            likelihood += np.exp(-0.5 * dist2 / (self.cfg.meas_std ** 2))
         in_any_fov = np.any(
             np.linalg.norm(self.particles[:, None, 0:2] - uav_positions[None, :, :], axis=2) <= self.cfg.fov_radius,
             axis=1,
         )
-        self.weights *= np.where(in_any_fov, 0.55 + self.cfg.p_detection * likelihood, 1.0)
+        p_detect = np.where(in_any_fov, self.cfg.filter_p_detection, 0.0).astype(np.float32)
+        if len(measurements) == 0:
+            self.weights *= 1.0 - p_detect
+            self._renormalize(max_total=max(self.cfg.phd_prior_count * 1.5, 1.0))
+            return
+        missed = (1.0 - p_detect) * self.weights
+        updated = missed.astype(np.float32)
+        norm_const = 1.0 / (2.0 * np.pi * self.cfg.meas_std ** 2)
+        clutter_intensity = (self.cfg.clutter_mean * max(len(uav_positions), 1)) / max(self.cfg.map_size ** 2, 1e-8)
+        for z in measurements:
+            dist2 = np.sum((self.particles[:, 0:2] - z[None, :]) ** 2, axis=1)
+            likelihood = norm_const * np.exp(-0.5 * dist2 / (self.cfg.meas_std ** 2))
+            numerator = p_detect * self.weights * likelihood
+            denominator = clutter_intensity + float(np.sum(numerator))
+            if denominator > 1e-12:
+                updated += numerator / denominator
+        self.weights = updated
         self._measurement_birth(measurements)
         self._renormalize(max_total=max(len(measurements) + self.cfg.phd_prior_count, 1.0))
         self._resample_if_needed()
@@ -109,10 +117,30 @@ class TargetBelief:
             grid[y, x] += w
         return grid
 
+    @staticmethod
+    def smooth_grid(grid: np.ndarray) -> np.ndarray:
+        padded = np.pad(grid, 1, mode="edge")
+        kernel = np.asarray(
+            [
+                [1.0, 2.0, 1.0],
+                [2.0, 4.0, 2.0],
+                [1.0, 2.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        out = np.zeros_like(grid, dtype=np.float32)
+        for dy in range(3):
+            for dx in range(3):
+                out += kernel[dy, dx] * padded[dy : dy + grid.shape[0], dx : dx + grid.shape[1]]
+        return out / float(np.sum(kernel))
+
     def peaks(self, max_peaks: Optional[int] = None) -> list[Peak]:
         max_peaks = max_peaks or self.cfg.max_target_candidates
-        grid = self.grid()
+        raw_grid = self.grid()
+        grid = self.smooth_grid(raw_grid)
         coords, scores = local_maxima_2d(grid, self.cfg.target_peak_min_weight)
+        if len(coords) == 0:
+            coords, scores = local_maxima_2d(raw_grid, self.cfg.target_peak_min_weight)
         if len(coords) == 0:
             return []
         points = (coords + 0.5) * self.cfg.cell_size

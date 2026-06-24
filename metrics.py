@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Optional
 
 from config import Config
 from environment import DiscoveredTruthMemory
@@ -44,17 +45,15 @@ def reward_terms(
     }
 
 
-def weighted_reward(terms: dict[str, float]) -> float:
+def weighted_reward(terms: dict[str, float], cfg: Optional[Config] = None) -> float:
+    if cfg is None:
+        cfg = Config()
     return (
-        1.0 * terms["observe"]
-        + 0.8 * terms["discover"]
-        + 0.55 * terms["fairness"]
-        + 0.35 * terms["continuity"]
-        + 0.30 * terms["search"]
-        - 0.35 * terms["overlap"]
-        - 0.50 * terms["miss"]
-        - 0.05 * terms["cost"]
-        - 0.02 * terms["switch"]
+        cfg.reward_observe_weight * terms["observe"]
+        + cfg.reward_discover_weight * terms["discover"]
+        + cfg.reward_continuity_weight * terms["continuity"]
+        + cfg.reward_search_weight * terms["search"]
+        + cfg.reward_miss_weight * terms["miss"]
     )
 
 

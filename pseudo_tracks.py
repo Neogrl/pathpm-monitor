@@ -27,9 +27,30 @@ class PseudoTrackMemory:
         self.tracks = []
         self.next_id = 0
 
+    def _merged_observations(self, measurements: np.ndarray, peaks: list[Peak]) -> list[tuple[np.ndarray, str]]:
+        raw: list[tuple[np.ndarray, str]] = [(m.astype(np.float32), "measurement") for m in measurements]
+        raw.extend((p.pos.astype(np.float32), "phd_peak") for p in peaks)
+        merged: list[tuple[np.ndarray, str, int]] = []
+        threshold = min(self.cfg.pseudo_track_assoc_gate, self.cfg.fov_radius * 0.4)
+        for pos, source in raw:
+            if not merged:
+                merged.append((pos.copy(), source, 1))
+                continue
+            dists = [float(np.linalg.norm(pos - item[0])) for item in merged]
+            idx = int(np.argmin(dists))
+            if dists[idx] <= threshold:
+                old_pos, old_source, count = merged[idx]
+                new_count = count + 1
+                new_pos = (old_pos * count + pos) / new_count
+                if source not in old_source:
+                    old_source = old_source + "+" + source
+                merged[idx] = (new_pos.astype(np.float32), old_source, new_count)
+            else:
+                merged.append((pos.copy(), source, 1))
+        return [(pos, source) for pos, source, _ in merged]
+
     def update(self, step: int, measurements: np.ndarray, peaks: list[Peak]) -> None:
-        observations: list[tuple[np.ndarray, str]] = [(m.astype(np.float32), "measurement") for m in measurements]
-        observations.extend((p.pos.astype(np.float32), "phd_peak") for p in peaks)
+        observations = self._merged_observations(measurements, peaks)
         matched_tracks: set[int] = set()
         for obs, source in observations:
             candidates = [(i, np.linalg.norm(obs - t.last_pos)) for i, t in enumerate(self.tracks) if i not in matched_tracks]
@@ -83,4 +104,3 @@ class PseudoTrackMemory:
             intents.append((pred.astype(np.float32), float(score)))
         intents.sort(key=lambda x: -x[1])
         return intents[: self.cfg.max_maintenance_candidates]
-

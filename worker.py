@@ -45,7 +45,7 @@ def team_summary(cfg: Config, env: CMUOMMTEnv, target_belief: TargetBelief, sear
             np.sum(target_belief.weights) / max(cfg.phd_prior_count, 1.0),
             np.mean(search_belief.search_belief),
             np.mean(search_belief.coverage_age) / cfg.search_age_scale,
-            np.mean(env.memory.is_discovered) if len(env.memory.is_discovered) else 0.0,
+            len(target_belief.peaks()) / max(cfg.max_target_candidates, 1) if not cfg.disable_phd_belief else 0.0,
         ],
         dtype=np.float32,
     )
@@ -57,27 +57,6 @@ def uav_state(cfg: Config, env: CMUOMMTEnv) -> np.ndarray:
     return np.concatenate([pos, zeros], axis=1).astype(np.float32)
 
 
-def true_target_state(cfg: Config, env: CMUOMMTEnv) -> np.ndarray:
-    out = np.zeros((cfg.max_true_targets, 5), dtype=np.float32)
-    n = min(len(env.target_states), cfg.max_true_targets)
-    out[:n, 0] = env.target_states[:n, 0] / cfg.map_size
-    out[:n, 1] = env.target_states[:n, 1] / cfg.map_size
-    out[:n, 2] = env.target_states[:n, 2] / cfg.target_speed
-    out[:n, 3] = env.target_states[:n, 3] / cfg.target_speed
-    out[:n, 4] = 1.0
-    return out
-
-
-def discovered_memory_state(cfg: Config, env: CMUOMMTEnv) -> np.ndarray:
-    out = np.zeros((cfg.max_true_targets, 4), dtype=np.float32)
-    n = min(len(env.memory.is_discovered), cfg.max_true_targets)
-    out[:n, 0] = env.memory.is_discovered[:n].astype(np.float32)
-    out[:n, 1] = env.memory.observation_count[:n] / max(cfg.episode_steps, 1)
-    out[:n, 2] = env.memory.current_gap[:n] / max(cfg.maintain_gap_threshold, 1)
-    out[:n, 3] = env.memory.max_observation_gap[:n] / max(cfg.episode_steps, 1)
-    return out
-
-
 class RolloutWorker:
     def __init__(self, cfg: Config, actor: Optional[OptionActor] = None, device: Union[torch.device, str] = "cpu"):
         self.cfg = cfg
@@ -86,6 +65,7 @@ class RolloutWorker:
         self.node_builder = NodeBuilder(cfg)
 
     def reset_stack(self, seed: int, n_targets: Optional[int] = None, eval_mode: bool = False):
+        self.node_builder.reset()
         env = CMUOMMTEnv(self.cfg)
         env.reset(seed=seed, n_targets=n_targets)
         target = TargetBelief(self.cfg, eval_mode=eval_mode)
@@ -109,7 +89,7 @@ class RolloutWorker:
         tracks: PseudoTrackMemory,
         prev_option: np.ndarray,
         greedy: bool,
-    ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         n, m = self.cfg.n_uavs, self.cfg.max_node_candidates
         node_inputs = np.zeros((n, m, 16), dtype=np.float32)
         node_padding_mask = np.ones((n, m), dtype=bool)
@@ -118,9 +98,12 @@ class RolloutWorker:
         actions = np.zeros(n, dtype=np.int64)
         options = prev_option.copy()
         terminations = np.zeros(n, dtype=bool)
+        log_probs = np.zeros(n, dtype=np.float32)
+        values = np.zeros(n, dtype=np.float32)
+        betas = np.zeros(n, dtype=np.float32)
         selected: list[np.ndarray] = []
         for i in range(n):
-            batch = self.node_builder.build(env.uav_positions, target, search, tracks, selected)
+            batch = self.node_builder.build(env.uav_positions, target, search, tracks, selected, step=env.step_count)
             node_inputs[i] = batch.node_inputs[i]
             node_padding_mask[i] = batch.node_padding_mask[i]
             action_mask[i] = batch.action_mask[i]
@@ -133,13 +116,22 @@ class RolloutWorker:
             else:
                 obs = self._obs_dict_from_arrays(node_inputs, node_padding_mask, action_mask, env, target, search, prev_option)
                 torch_obs = self._to_torch(obs, batch_dim=True)
-                action_t, option_t, term_t = self.actor.act(**torch_obs, greedy=greedy)
+                if hasattr(self.actor, "act_with_info"):
+                    action_t, option_t, term_t, logp_t, value_t, beta_t = self.actor.act_with_info(**torch_obs, greedy=greedy)
+                else:
+                    action_t, option_t, term_t = self.actor.act(**torch_obs, greedy=greedy)
+                    logp_t = torch.zeros_like(action_t, dtype=torch.float32)
+                    value_t = torch.zeros_like(action_t, dtype=torch.float32)
+                    beta_t = torch.zeros_like(action_t, dtype=torch.float32)
                 actions[i] = int(action_t[0, i].cpu().item())
                 options[i] = int(option_t[0, i].cpu().item())
                 terminations[i] = bool(term_t[0, i].cpu().item())
+                log_probs[i] = float(logp_t[0, i].cpu().item())
+                values[i] = float(value_t[0, i].cpu().item())
+                betas[i] = float(beta_t[0, i].cpu().item())
             selected.append(waypoints[i, actions[i]].copy())
         obs = self._obs_dict_from_arrays(node_inputs, node_padding_mask, action_mask, env, target, search, prev_option)
-        return obs, actions, options, terminations, np.asarray(selected, dtype=np.float32)
+        return obs, actions, options, terminations, np.asarray(selected, dtype=np.float32), log_probs, values, betas
 
     def _obs_dict_from_arrays(
         self,
@@ -160,8 +152,6 @@ class RolloutWorker:
             "team_summary": team_summary(self.cfg, env, target, search, []),
             "global_phd": target.summary(),
             "global_search": search.summary(),
-            "true_target_states": true_target_state(self.cfg, env),
-            "discovered_memory": discovered_memory_state(self.cfg, env),
         }
 
     def _to_torch(self, obs: dict, batch_dim: bool = False) -> dict[str, torch.Tensor]:
@@ -190,11 +180,11 @@ class RolloutWorker:
             "target_node_count": float(np.sum(valid & (features[:, :, 12] > 0.5))),
             "search_node_count": float(np.sum(valid & (features[:, :, 13] > 0.5))),
             "maintenance_node_count": float(np.sum(valid & (features[:, :, 14] > 0.5))),
-            "local_node_count": float(np.sum(valid & (features[:, :, 15] > 0.5))),
+            "goal_node_count": float(np.sum(valid & (features[:, :, 15] > 0.5))),
             "selected_target_rate": float(np.mean(selected_features[:, 12] > 0.5)),
             "selected_search_rate": float(np.mean(selected_features[:, 13] > 0.5)),
             "selected_maintenance_rate": float(np.mean(selected_features[:, 14] > 0.5)),
-            "selected_local_rate": float(np.mean(selected_features[:, 15] > 0.5)),
+            "selected_goal_rate": float(np.mean(selected_features[:, 15] > 0.5)),
         }
 
     def run_episode(
@@ -216,30 +206,45 @@ class RolloutWorker:
             "target_node_count": [],
             "search_node_count": [],
             "maintenance_node_count": [],
-            "local_node_count": [],
+            "goal_node_count": [],
             "selected_target_rate": [],
             "selected_search_rate": [],
             "selected_maintenance_rate": [],
-            "selected_local_rate": [],
+            "selected_goal_rate": [],
             "switch_rate": [],
+            "mean_beta": [],
+            "option_0_ratio": [],
+            "option_1_ratio": [],
             "search_belief_mean": [],
             "coverage_age_mean": [],
             "target_estimated_count": [],
             "track_count": [],
+            "reward_observe": [],
+            "reward_discover": [],
+            "reward_continuity": [],
+            "reward_search": [],
+            "reward_miss": [],
+            "reward_fairness_metric": [],
+            "reward_overlap_metric": [],
+            "reward_cost_metric": [],
+            "reward_switch_metric": [],
         }
         for _ in range(self.cfg.episode_steps):
             target.predict()
-            obs, actions, options, terminations, selected_waypoints = self._sequential_obs_and_actions(env, target, search, tracks, prev_option, greedy)
+            obs, actions, options, terminations, selected_waypoints, log_probs, values, betas = self._sequential_obs_and_actions(env, target, search, tracks, prev_option, greedy)
             node_diag = self._node_diagnostics(obs, actions)
             for key, value in node_diag.items():
                 diagnostics[key].append(value)
             prev_search = float(np.mean(search.search_belief))
             info = env.step(selected_waypoints)
             target.update(info.measurements.points, env.uav_positions)
-            peaks = target.peaks()
+            peaks = [] if self.cfg.disable_phd_belief else target.peaks()
             tracks.update(env.step_count, info.measurements.points, peaks)
             search.update(env.uav_positions, info.measurements.points)
             diagnostics["switch_rate"].append(float(np.mean(terminations.astype(np.float32))))
+            diagnostics["mean_beta"].append(float(np.mean(betas)))
+            diagnostics["option_0_ratio"].append(float(np.mean(options == 0)))
+            diagnostics["option_1_ratio"].append(float(np.mean(options == 1)))
             diagnostics["search_belief_mean"].append(float(np.mean(search.search_belief)))
             diagnostics["coverage_age_mean"].append(float(np.mean(search.coverage_age)))
             diagnostics["target_estimated_count"].append(float(np.sum(target.weights)))
@@ -257,10 +262,19 @@ class RolloutWorker:
                 info.step_distance,
                 terminations.astype(np.float32),
             )
-            reward = weighted_reward(terms)
+            reward = weighted_reward(terms, self.cfg)
+            diagnostics["reward_observe"].append(terms["observe"])
+            diagnostics["reward_discover"].append(terms["discover"])
+            diagnostics["reward_continuity"].append(terms["continuity"])
+            diagnostics["reward_search"].append(terms["search"])
+            diagnostics["reward_miss"].append(terms["miss"])
+            diagnostics["reward_fairness_metric"].append(terms["fairness"])
+            diagnostics["reward_overlap_metric"].append(terms["overlap"])
+            diagnostics["reward_cost_metric"].append(terms["cost"])
+            diagnostics["reward_switch_metric"].append(terms["switch"])
             rewards.append(reward)
             overlaps.append(terms["overlap"])
-            next_batch = self.node_builder.build(env.uav_positions, target, search, tracks)
+            next_batch = self.node_builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
             next_obs = self._obs_dict_from_arrays(
                 next_batch.node_inputs,
                 next_batch.node_padding_mask,
@@ -280,11 +294,11 @@ class RolloutWorker:
                     "team_summary": obs["team_summary"],
                     "global_phd": obs["global_phd"],
                     "global_search": obs["global_search"],
-                    "true_target_states": obs["true_target_states"],
-                    "discovered_memory": obs["discovered_memory"],
                     "actions": actions,
                     "options": options,
                     "terminations": terminations.astype(np.float32),
+                    "log_probs": log_probs.astype(np.float32),
+                    "values": values.astype(np.float32),
                     "reward": np.asarray(reward, dtype=np.float32),
                     "done": np.asarray(float(env.done()), dtype=np.float32),
                     "next_node_inputs": next_obs["node_inputs"],
@@ -295,8 +309,6 @@ class RolloutWorker:
                     "next_team_summary": next_obs["team_summary"],
                     "next_global_phd": next_obs["global_phd"],
                     "next_global_search": next_obs["global_search"],
-                    "next_true_target_states": next_obs["true_target_states"],
-                    "next_discovered_memory": next_obs["discovered_memory"],
                 }
                 replay.add(transition)
             prev_option = options.copy()

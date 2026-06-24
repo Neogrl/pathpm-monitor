@@ -6,7 +6,7 @@ import numpy as np
 
 from config import Config
 from evaluate import evaluate_baseline_episode
-from replay_buffer import ReplayBuffer
+from ppo_buffer import PPORolloutBuffer
 from trainer import Trainer
 from utils import write_json
 from worker import RolloutWorker
@@ -55,14 +55,14 @@ def run_baseline(cfg: Config, baseline: str, episodes: int, seed: int, out: Path
 def rollout_stability(cfg: Config, episodes: int, steps: int, seed: int, out: Path) -> dict:
     cfg.episode_steps = steps
     trainer = Trainer(cfg, cfg.device)
-    replay = ReplayBuffer(cfg.replay_size)
+    rollout = PPORolloutBuffer()
     worker = RolloutWorker(cfg, actor=trainer.actor, device=cfg.device)
     rows = []
     failures = []
     for ep in range(episodes):
         print(f"[stability] episode {ep + 1}/{episodes}", flush=True)
         try:
-            metrics = worker.run_episode(seed + ep, replay=replay, greedy=False, randomize_targets=True)
+            metrics = worker.run_episode(seed + ep, replay=rollout, greedy=False, randomize_targets=True)
             metrics["episode_index"] = ep
             rows.append(metrics)
             numeric = [float(v) for v in metrics.values() if isinstance(v, (int, float, np.floating, np.integer))]
@@ -75,7 +75,7 @@ def rollout_stability(cfg: Config, episodes: int, steps: int, seed: int, out: Pa
     summary = {
         "episodes": episodes,
         "steps": steps,
-        "replay_size": len(replay),
+        "rollout_size": len(rollout),
         "failure_count": len(failures),
         "failures": failures[:10],
         "mean_episode_reward": float(np.nanmean([r["episode_reward"] for r in rows])) if rows else float("nan"),

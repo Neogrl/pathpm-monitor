@@ -6,7 +6,7 @@ from typing import Optional
 import numpy as np
 import torch
 
-from baselines import HeuristicBaseline, RandomBaseline
+from baselines import CoverageBaseline, HeuristicBaseline, PHDGreedyBaseline, RandomBaseline, SearchGreedyBaseline
 from config import Config
 from model import OptionActor
 from nodes import NodeBuilder
@@ -20,11 +20,36 @@ from utils import write_json
 from worker import RolloutWorker
 
 
+def apply_ablation(cfg: Config, ablation: Optional[str]) -> None:
+    if ablation is None:
+        return
+    if ablation == "no_search":
+        cfg.disable_search_belief = True
+        cfg.reward_search_weight = 0.0
+    elif ablation == "no_phd":
+        cfg.disable_phd_belief = True
+    elif ablation == "no_option":
+        cfg.disable_options = True
+        cfg.disable_termination = True
+    elif ablation == "no_termination":
+        cfg.disable_termination = True
+    elif ablation == "no_discover_reward":
+        cfg.reward_discover_weight = 0.0
+    elif ablation == "no_miss_penalty":
+        cfg.reward_miss_weight = 0.0
+
+
 def make_baseline(name: str):
     if name == "random":
         return RandomBaseline()
     if name == "heuristic":
         return HeuristicBaseline()
+    if name == "coverage":
+        return CoverageBaseline()
+    if name == "search":
+        return SearchGreedyBaseline()
+    if name == "phd":
+        return PHDGreedyBaseline()
     raise ValueError(f"Unknown baseline: {name}")
 
 
@@ -36,6 +61,7 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
     search = SearchBelief(cfg)
     tracks = PseudoTrackMemory(cfg)
     node_builder = NodeBuilder(cfg)
+    node_builder.reset()
     baseline = make_baseline(baseline_name)
     rng = np.random.default_rng(seed + 303)
     rewards = []
@@ -43,13 +69,13 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
     prev_option = np.zeros(cfg.n_uavs, dtype=np.int64)
     for _ in range(cfg.episode_steps):
         target.predict()
-        batch = node_builder.build(env.uav_positions, target, search, tracks)
+        batch = node_builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         actions = baseline.select(cfg, batch, rng)
         selected_waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         prev_search = float(np.mean(search.search_belief))
         info = env.step(selected_waypoints)
         target.update(info.measurements.points, env.uav_positions)
-        tracks.update(env.step_count, info.measurements.points, target.peaks())
+        tracks.update(env.step_count, info.measurements.points, [] if cfg.disable_phd_belief else target.peaks())
         search.update(env.uav_positions, info.measurements.points)
         cur_search = float(np.mean(search.search_belief))
         terms = reward_terms(
@@ -64,7 +90,7 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
             info.step_distance,
             np.zeros(cfg.n_uavs, dtype=np.float32),
         )
-        rewards.append(weighted_reward(terms))
+        rewards.append(weighted_reward(terms, cfg))
         overlaps.append(terms["overlap"])
         prev_option[:] = 0
         if env.done():
@@ -102,9 +128,16 @@ def evaluate_policy(cfg: Config, episodes: int, seed: int, checkpoint: Optional[
     summary = {}
     for key in keys:
         values = np.asarray([m[key] for m in metrics], dtype=np.float32)
-        summary[key] = float(np.nan) if np.all(np.isnan(values)) else float(np.nanmean(values))
+        if np.all(np.isnan(values)):
+            summary[key] = float(np.nan)
+            summary[f"{key}_std"] = float(np.nan)
+        else:
+            summary[key] = float(np.nanmean(values))
+            summary[f"{key}_std"] = float(np.nanstd(values))
     summary["episodes"] = episodes
     summary["seed"] = seed
+    summary["seed_start"] = seed
+    summary["seed_end"] = seed + episodes - 1
     return summary
 
 
@@ -113,10 +146,20 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=500)
     parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--baseline", type=str, choices=["random", "heuristic"], default=None)
+    parser.add_argument("--baseline", type=str, choices=["random", "coverage", "search", "phd", "heuristic"], default=None)
     parser.add_argument("--out-dir", type=str, default="evaluation_runs/eval")
+    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument(
+        "--ablation",
+        type=str,
+        choices=["no_search", "no_phd", "no_option", "no_termination", "no_discover_reward", "no_miss_penalty"],
+        default=None,
+    )
     args = parser.parse_args()
     cfg = Config()
+    if args.steps is not None:
+        cfg.episode_steps = args.steps
+    apply_ablation(cfg, args.ablation)
     summary = evaluate_policy(cfg, args.episodes, args.seed, checkpoint=args.checkpoint, baseline=args.baseline)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
