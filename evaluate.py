@@ -149,6 +149,7 @@ def main() -> None:
     parser.add_argument("--baseline", type=str, choices=["random", "coverage", "search", "phd", "heuristic"], default=None)
     parser.add_argument("--out-dir", type=str, default="evaluation_runs/eval")
     parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--device", type=str, default=None)
     parser.add_argument(
         "--ablation",
         type=str,
@@ -159,6 +160,8 @@ def main() -> None:
     cfg = Config()
     if args.steps is not None:
         cfg.episode_steps = args.steps
+    if args.device is not None:
+        cfg.device = args.device
     apply_ablation(cfg, args.ablation)
     summary = evaluate_policy(cfg, args.episodes, args.seed, checkpoint=args.checkpoint, baseline=args.baseline)
     out = Path(args.out_dir)

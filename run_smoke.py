@@ -15,9 +15,12 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
     cfg = Config()
     cfg.episode_steps = args.steps
+    if args.device is not None:
+        cfg.device = args.device
     cfg.ppo_minibatch_size = min(cfg.ppo_minibatch_size, 8)
     device = torch.device(cfg.device)
     trainer = Trainer(cfg, device)

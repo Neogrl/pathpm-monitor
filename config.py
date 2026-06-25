@@ -7,7 +7,7 @@ class Config:
     project_name: str = "CMUOMMT_planToGo_v1"
     map_size: float = 100.0
     dt: float = 1.0
-    episode_steps: int = 60
+    episode_steps: int = 256
     n_uavs: int = 3
     n_targets_true: int = 5
     n_targets_min: int = 3
@@ -57,18 +57,22 @@ class Config:
     gamma: float = 0.99
     gae_lambda: float = 0.95
     ppo_clip_coef: float = 0.20
-    ppo_value_coef: float = 0.50
-    ppo_entropy_coef: float = 0.01
-    ppo_switch_coef: float = 0.02
+    ppo_value_coef: float = 0.20
+    ppo_entropy_coef: float = 0.00
+    ppo_switch_coef: float = 0.01
     ppo_update_epochs: int = 4
     ppo_minibatch_size: int = 256
-    ppo_max_grad_norm: float = 0.50
-    updates_per_collection: int = 4
-    actor_lr: float = 1e-5
-    eval_interval: int = 10
-    eval_episodes: int = 20
+    ppo_max_grad_norm: float = 5.00
+    updates_per_collection: int = 16
+    rollout_workers: int = 8
+    rollout_device: str = "cpu"
+    actor_lr: float = 1e-4
+    lr_decay_step: int = 250
+    lr_decay_gamma: float = 0.96
+    eval_interval: int = 0
+    eval_episodes: int = 0
     log_interval: int = 10
-    save_interval: int = 50
+    save_interval: int = 100
     validation_seed: int = 700
     test_seed: int = 500
     randomize_train_targets: bool = True
@@ -83,8 +87,8 @@ class Config:
     reward_miss_weight: float = -0.5
     ospa_cutoff: float = 25.0
     ospa_order: int = 1
-    output_dir: str = "training_runs"
-    device: str = "cpu"
+    output_dir: str = "training_output"
+    device: str = "cuda"
 
     @property
     def cell_size(self) -> float:

@@ -17,6 +17,9 @@ class PPORolloutBuffer:
     def add(self, transition: dict[str, Any]) -> None:
         self.data.append(transition)
 
+    def extend(self, transitions: list[dict[str, Any]]) -> None:
+        self.data.extend(transitions)
+
     def _stack(self, key: str) -> np.ndarray:
         return np.stack([item[key] for item in self.data])
 

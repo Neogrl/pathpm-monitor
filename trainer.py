@@ -24,6 +24,7 @@ class TrainStats:
     grad_norm: float
     mean_beta: float
     switch_loss: float
+    learning_rate: float
 
 
 class Trainer:
@@ -32,6 +33,11 @@ class Trainer:
         self.device = torch.device(device)
         self.actor = OptionActor(cfg).to(self.device)
         self.optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.actor_lr)
+        self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer,
+            step_size=cfg.lr_decay_step,
+            gamma=cfg.lr_decay_gamma,
+        )
         self.update_count = 0
 
     def actor_args(self, batch: dict[str, torch.Tensor]) -> tuple:
@@ -99,11 +105,13 @@ class Trainer:
                         grad_norm=float(grad_norm.detach().cpu()),
                         mean_beta=float(beta.mean().detach().cpu()),
                         switch_loss=float(switch_loss.detach().cpu()),
+                        learning_rate=float(self.optimizer.param_groups[0]["lr"]),
                     )
                 )
+        self.lr_scheduler.step()
 
         if not stats:
-            return TrainStats(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            return TrainStats(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float(self.optimizer.param_groups[0]["lr"]))
         return TrainStats(
             policy_loss=float(sum(s.policy_loss for s in stats) / len(stats)),
             value_loss=float(sum(s.value_loss for s in stats) / len(stats)),
@@ -117,6 +125,7 @@ class Trainer:
             grad_norm=float(sum(s.grad_norm for s in stats) / len(stats)),
             mean_beta=float(sum(s.mean_beta for s in stats) / len(stats)),
             switch_loss=float(sum(s.switch_loss for s in stats) / len(stats)),
+            learning_rate=float(self.optimizer.param_groups[0]["lr"]),
         )
 
     def save(self, path: Path) -> None:
@@ -125,6 +134,7 @@ class Trainer:
             {
                 "actor": self.actor.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
+                "lr_scheduler": self.lr_scheduler.state_dict(),
                 "update_count": self.update_count,
                 "algorithm": "ppo",
             },
@@ -139,4 +149,6 @@ class Trainer:
         self.actor.load_state_dict(ckpt["actor"])
         if "optimizer" in ckpt:
             self.optimizer.load_state_dict(ckpt["optimizer"])
+        if "lr_scheduler" in ckpt:
+            self.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
         self.update_count = int(ckpt.get("update_count", 0))

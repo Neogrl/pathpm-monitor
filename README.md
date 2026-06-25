@@ -16,24 +16,29 @@ The actor uses ORION-style encoder/decoder/pointer modules and option terminatio
 Smoke commands:
 
 ```powershell
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' run_smoke.py --episodes 2 --steps 10 --seed 1
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 2 --steps 5 --seed 2 --run-name smoke_ppo --updates-per-collection 1 --ppo-minibatch-size 8 --ppo-update-epochs 2 --eval-interval 1 --eval-episodes 1 --log-interval 1 --save-interval 1
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 2 --steps 5 --seed 500 --checkpoint training_runs/smoke_ppo/latest.pt
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' run_smoke.py --episodes 2 --steps 10 --seed 1 --device cpu
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 2 --steps 5 --seed 2 --run-name smoke_ppo --updates-per-collection 1 --rollout-workers 1 --ppo-minibatch-size 8 --ppo-update-epochs 2 --log-interval 1 --save-interval 1 --device cpu
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 2 --steps 5 --seed 500 --checkpoint training_runs/smoke_ppo/latest.pt --device cpu
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 1 --seed 600 --baseline heuristic --out-dir evaluation_runs/heuristic_smoke
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' pretrain_checks.py --episodes 20 --steps 60 --seed 900 --out-dir diagnostic_runs/pretrain_checks
 ```
 
-Default PPO training:
+Formal PPO training:
 
 ```powershell
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_pilot_1k --updates-per-collection 4 --ppo-minibatch-size 128 --ppo-update-epochs 4 --eval-interval 25 --eval-episodes 20 --log-interval 5 --save-interval 25
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --run-name ppo_formal_5k
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k --updates-per-collection 16 --rollout-workers 8 --rollout-device cpu --ppo-minibatch-size 256 --ppo-update-epochs 4 --log-interval 10 --save-interval 100 --device cuda
 ```
+
+The formal PPO defaults follow STAMP where it transfers cleanly: `updates_per_collection=16`, `ppo_minibatch_size=256`, `actor_lr=1e-4`, `ppo_update_epochs=4`, `ppo_clip_coef=0.2`, `ppo_value_coef=0.2`, no entropy bonus, `ppo_max_grad_norm=5`, and StepLR decay with `lr_decay_step=250`, `lr_decay_gamma=0.96`. `gae_lambda` remains `0.95` because CMUOMMT has delayed discovery and maintenance rewards.
+
+Training-time evaluation is disabled by default (`eval_interval=0`, `eval_episodes=0`) to match STAMP-style throughput. Use `evaluate.py` for fixed-seed validation and final reporting. Rollout collection uses CPU workers by default (`rollout_workers=8`, `rollout_device=cpu`), while PPO updates run on `device`.
 
 Training logs:
 
 ```powershell
-tensorboard --logdir training_runs\ppo_pilot_1k\tensorboard
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_wandb_1k --wandb
+tensorboard --logdir training_runs\ppo_formal_5k\tensorboard
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k_wandb --wandb
 ```
 
 TensorBoard is enabled by default and writes to `training_runs/<run_name>/tensorboard`. Use `--no-tensorboard` to disable it. W&B is disabled by default and enabled with `--wandb`.
@@ -49,22 +54,22 @@ Fairness, overlap, movement cost, and option switch rate are recorded as diagnos
 Baselines:
 
 ```powershell
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 60 --seed 500 --baseline random --out-dir evaluation_runs/random
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 60 --seed 500 --baseline coverage --out-dir evaluation_runs/coverage
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 60 --seed 500 --baseline search --out-dir evaluation_runs/search
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 60 --seed 500 --baseline phd --out-dir evaluation_runs/phd
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 60 --seed 500 --baseline heuristic --out-dir evaluation_runs/heuristic
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 256 --seed 500 --baseline random --out-dir evaluation_runs/random
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 256 --seed 500 --baseline coverage --out-dir evaluation_runs/coverage
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 256 --seed 500 --baseline search --out-dir evaluation_runs/search
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 256 --seed 500 --baseline phd --out-dir evaluation_runs/phd
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 20 --steps 256 --seed 500 --baseline heuristic --out-dir evaluation_runs/heuristic
 ```
 
 Ablation entry points:
 
 ```powershell
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_no_search --ablation no_search
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_no_phd --ablation no_phd
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_no_option --ablation no_option
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_no_termination --ablation no_termination
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_no_discover_reward --ablation no_discover_reward
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 60 --seed 10 --run-name ppo_no_miss_penalty --ablation no_miss_penalty
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 256 --seed 10 --run-name ppo_no_search --ablation no_search
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 256 --seed 10 --run-name ppo_no_phd --ablation no_phd
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 256 --seed 10 --run-name ppo_no_option --ablation no_option
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 256 --seed 10 --run-name ppo_no_termination --ablation no_termination
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 256 --seed 10 --run-name ppo_no_discover_reward --ablation no_discover_reward
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 1000 --steps 256 --seed 10 --run-name ppo_no_miss_penalty --ablation no_miss_penalty
 ```
 
 Visualization tools:
