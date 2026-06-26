@@ -1,10 +1,11 @@
 import argparse
 import csv
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TextIO
 
 
 THREAD_ENV_DEFAULTS = {
@@ -107,6 +108,51 @@ class TrainingLogger:
             self.writer.close()
         if self.wandb is not None:
             self.wandb.finish()
+
+
+class TeeStream:
+    def __init__(self, *streams: TextIO):
+        self.streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+            stream.flush()
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+
+class ConsoleLogCapture:
+    def __init__(self, path: Path, append: bool = False):
+        self.path = path
+        self.append = append
+        self.file: Optional[TextIO] = None
+        self.stdout: Optional[TextIO] = None
+        self.stderr: Optional[TextIO] = None
+
+    def __enter__(self) -> "ConsoleLogCapture":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = self.path.open("a" if self.append else "w", encoding="utf-8", buffering=1)
+        self.stdout = sys.stdout
+        self.stderr = sys.stderr
+        sys.stdout = TeeStream(self.stdout, self.file)  # type: ignore[assignment]
+        sys.stderr = TeeStream(self.stderr, self.file)  # type: ignore[assignment]
+        print(f"[train] console log file={self.path}", flush=True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self.stdout is not None:
+            sys.stdout = self.stdout
+        if self.stderr is not None:
+            sys.stderr = self.stderr
+        if self.file is not None:
+            self.file.close()
 
 
 def safe_mean(values: list[float]) -> float:
@@ -327,96 +373,118 @@ def train(
     run_name: str,
     resume: bool = False,
     validation_metric: str = "val_discovery_rate",
+    best_metric: Optional[str] = None,
     use_tensorboard: bool = True,
     use_wandb: bool = False,
+    log_file: str = "train.log",
 ) -> dict:
     cfg.episode_steps = steps
     configure_thread_env(cfg.worker_num_threads, overwrite=True)
     configure_torch_threads(cfg.worker_num_threads)
     out = ensure_output_dir(cfg, run_name)
-    write_json(out / "config.json", asdict(cfg))
-    logger = TrainingLogger(out, run_name, use_tensorboard=use_tensorboard, use_wandb=use_wandb)
-    print(
-        "[train] start "
-        f"run_name={run_name} updates={updates} steps={steps} seed={seed} device={cfg.device} "
-        f"episodes_per_collection={cfg.episodes_per_collection} ppo_epochs={cfg.ppo_update_epochs} "
-        f"ppo_minibatch_size={cfg.ppo_minibatch_size} rollout_backend={cfg.rollout_backend} "
-        f"rollout_workers={cfg.rollout_workers} rollout_cpus_per_worker={cfg.rollout_cpus_per_worker} "
-        f"rollout_gpus_per_worker={cfg.rollout_gpus_per_worker} worker_num_threads={cfg.worker_num_threads} "
-        f"rollout_device={cfg.rollout_device} eval_interval={cfg.eval_interval} "
-        f"eval_episodes={cfg.eval_episodes} log_interval={cfg.log_interval} save_interval={cfg.save_interval} "
-        f"tensorboard={use_tensorboard} wandb={use_wandb} out={out}",
-        flush=True,
-    )
+    with ConsoleLogCapture(out / log_file, append=resume):
+        write_json(out / "config.json", asdict(cfg))
+        logger = TrainingLogger(out, run_name, use_tensorboard=use_tensorboard, use_wandb=use_wandb)
+        print(
+            "[train] start "
+            f"run_name={run_name} updates={updates} steps={steps} seed={seed} device={cfg.device} "
+            f"episodes_per_collection={cfg.episodes_per_collection} ppo_epochs={cfg.ppo_update_epochs} "
+            f"ppo_minibatch_size={cfg.ppo_minibatch_size} rollout_backend={cfg.rollout_backend} "
+            f"rollout_workers={cfg.rollout_workers} rollout_cpus_per_worker={cfg.rollout_cpus_per_worker} "
+            f"rollout_gpus_per_worker={cfg.rollout_gpus_per_worker} worker_num_threads={cfg.worker_num_threads} "
+            f"rollout_device={cfg.rollout_device} eval_interval={cfg.eval_interval} "
+            f"eval_episodes={cfg.eval_episodes} log_interval={cfg.log_interval} "
+            f"checkpoint_episode_interval={cfg.checkpoint_episode_interval} best_metric={best_metric or cfg.best_metric} "
+            f"tensorboard={use_tensorboard} wandb={use_wandb} out={out}",
+            flush=True,
+        )
 
-    device = torch.device(cfg.device)
-    trainer = Trainer(cfg, device)
-    latest_path = out / "latest.pt"
-    if resume and latest_path.exists():
-        print(f"[train] resume checkpoint={latest_path}", flush=True)
-        trainer.load(latest_path)
+        device = torch.device(cfg.device)
+        trainer = Trainer(cfg, device)
+        latest_path = out / "latest.pt"
+        if resume and latest_path.exists():
+            print(f"[train] resume checkpoint={latest_path}", flush=True)
+            trainer.load(latest_path)
 
-    rows: list[dict] = []
-    episode_seed = seed
-    best_value = -float("inf")
-    best_summary = {}
-    worker_count = min(max(cfg.rollout_workers, 1), max(cfg.episodes_per_collection, 1))
-    rollout_pool = create_rollout_pool(cfg, worker_count)
-    try:
-        for update in range(updates):
-            update_label = f"update {update + 1}/{updates}"
-            print(f"[train] {update_label}: collect rollout", flush=True)
-            rollout, episode_rows, episode_seed = collect_rollouts(cfg, trainer, episode_seed, rollout_pool, update_label)
-            episode_metrics = aggregate_dicts(episode_rows)
-            print(f"[train] update {update + 1}/{updates}: ppo update rollout_size={len(rollout)}", flush=True)
-            train_stats = trainer.update(rollout).__dict__
+        rows: list[dict] = []
+        episode_seed = seed
+        completed_episodes = 0
+        next_checkpoint_episode = max(cfg.checkpoint_episode_interval, 1)
+        best_value = -float("inf")
+        best_summary = {}
+        worker_count = min(max(cfg.rollout_workers, 1), max(cfg.episodes_per_collection, 1))
+        rollout_pool = create_rollout_pool(cfg, worker_count)
+        try:
+            for update in range(updates):
+                update_label = f"update {update + 1}/{updates}"
+                print(f"[train] {update_label}: collect rollout", flush=True)
+                rollout, episode_rows, episode_seed = collect_rollouts(cfg, trainer, episode_seed, rollout_pool, update_label)
+                completed_episodes += len(episode_rows)
+                episode_metrics = aggregate_dicts(episode_rows)
+                print(f"[train] update {update + 1}/{updates}: ppo update rollout_size={len(rollout)}", flush=True)
+                train_stats = trainer.update(rollout).__dict__
 
-            row = {
-                "update": trainer.update_count,
-                "collection_index": update,
-                "rollout_size": len(rollout),
-                **train_stats,
-                **episode_metrics,
-            }
+                row = {
+                    "update": trainer.update_count,
+                    "collection_index": update,
+                    "episode_count": completed_episodes,
+                    "rollout_size": len(rollout),
+                    **train_stats,
+                    **episode_metrics,
+                }
 
-            should_eval = (
-                cfg.eval_interval > 0
-                and cfg.eval_episodes > 0
-                and (
-                    update == 0
-                    or update == updates - 1
-                    or ((update + 1) % cfg.eval_interval == 0)
-                )
-            )
-            if should_eval:
-                print(f"[train] update {update + 1}/{updates}: eval", flush=True)
-                val_metrics = evaluate_actor(cfg, trainer, cfg.eval_episodes, cfg.validation_seed)
-                row.update(val_metrics)
-                metric_value = row.get(validation_metric, -float("inf"))
+                should_eval = (
+                    cfg.eval_interval > 0
+                    and cfg.eval_episodes > 0
+                    and (
+                        update == 0
+                        or update == updates - 1
+                        or ((update + 1) % cfg.eval_interval == 0)
+                    )
+                    )
+                if should_eval:
+                    print(f"[train] update {update + 1}/{updates}: eval", flush=True)
+                    val_metrics = evaluate_actor(cfg, trainer, cfg.eval_episodes, cfg.validation_seed)
+                    row.update(val_metrics)
+
+                metric_name = validation_metric if validation_metric in row else (best_metric or cfg.best_metric)
+                metric_value = row.get(metric_name, -float("inf"))
                 if isinstance(metric_value, (int, float)) and not np.isnan(metric_value) and metric_value > best_value:
                     best_value = float(metric_value)
                     best_summary = row.copy()
                     trainer.save(out / "best.pt")
-                    print(f"[train] update {update + 1}/{updates}: new best {validation_metric}={best_value:.4f}", flush=True)
+                    print(f"[train] update {update + 1}/{updates}: saved best {metric_name}={best_value:.4f}", flush=True)
 
-            rows.append(row)
-            logger.log(row, trainer.update_count)
-            print(f"[train] update {update + 1}/{updates}: done {format_progress(row)}", flush=True)
-            if (update + 1) % max(cfg.save_interval, 1) == 0 or update == updates - 1:
+                rows.append(row)
+                logger.log(row, trainer.update_count)
+                print(f"[train] update {update + 1}/{updates}: done {format_progress(row)}", flush=True)
                 trainer.save(latest_path)
-                trainer.save(out / f"checkpoint_update_{trainer.update_count}.pt")
-                print(f"[train] update {update + 1}/{updates}: saved latest/checkpoint update_count={trainer.update_count}", flush=True)
-            if (update + 1) % max(cfg.log_interval, 1) == 0 or update == updates - 1 or should_eval:
-                write_table(out / "training_metrics.csv", rows)
-                write_json(out / "training_summary.json", row)
-                if best_summary:
-                    write_json(out / "best_summary.json", best_summary)
-                print(f"[train] update {update + 1}/{updates}: wrote metrics rows={len(rows)}", flush=True)
-    finally:
-        close_rollout_pool(rollout_pool)
-        logger.close()
+                print(f"[train] update {update + 1}/{updates}: saved latest update_count={trainer.update_count}", flush=True)
+                checkpoint_due = False
+                while completed_episodes >= next_checkpoint_episode:
+                    checkpoint_due = True
+                    next_checkpoint_episode += max(cfg.checkpoint_episode_interval, 1)
+                if checkpoint_due or update == updates - 1:
+                    checkpoint_path = out / f"checkpoint_episode_{completed_episodes}_update_{trainer.update_count}.pt"
+                    trainer.save(checkpoint_path)
+                    print(
+                        f"[train] update {update + 1}/{updates}: saved checkpoint "
+                        f"episode_count={completed_episodes} update_count={trainer.update_count} path={checkpoint_path}",
+                        flush=True,
+                    )
+                if (update + 1) % max(cfg.log_interval, 1) == 0 or update == updates - 1 or should_eval:
+                    write_table(out / "training_metrics.csv", rows)
+                    write_json(out / "training_summary.json", row)
+                    if best_summary:
+                        write_json(out / "best_summary.json", best_summary)
+                    print(f"[train] update {update + 1}/{updates}: wrote metrics rows={len(rows)}", flush=True)
+        finally:
+            close_rollout_pool(rollout_pool)
+            logger.close()
 
-    return rows[-1] if rows else {}
+        summary = rows[-1] if rows else {}
+        print(f"[train] final summary {summary}", flush=True)
+        return summary
 
 
 def main() -> None:
@@ -439,7 +507,10 @@ def main() -> None:
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-episodes", type=int, default=None)
     parser.add_argument("--log-interval", type=int, default=None)
-    parser.add_argument("--save-interval", type=int, default=None)
+    parser.add_argument("--checkpoint-episode-interval", type=int, default=None)
+    parser.add_argument("--save-interval", type=int, default=None, help="Deprecated alias for --checkpoint-episode-interval.")
+    parser.add_argument("--best-metric", type=str, default=None)
+    parser.add_argument("--log-file", type=str, default="train.log")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--validation-metric", type=str, default="val_discovery_rate")
@@ -459,6 +530,11 @@ def main() -> None:
         if args.episodes_per_collection is not None
         else args.updates_per_collection
     )
+    checkpoint_episode_interval = (
+        args.checkpoint_episode_interval
+        if args.checkpoint_episode_interval is not None
+        else args.save_interval
+    )
     overrides = {
         "ppo_minibatch_size": args.ppo_minibatch_size or args.batch_size,
         "ppo_update_epochs": args.ppo_update_epochs,
@@ -472,7 +548,8 @@ def main() -> None:
         "eval_interval": args.eval_interval,
         "eval_episodes": args.eval_episodes,
         "log_interval": args.log_interval,
-        "save_interval": args.save_interval,
+        "checkpoint_episode_interval": checkpoint_episode_interval,
+        "best_metric": args.best_metric,
         "device": args.device,
     }
     for key, value in overrides.items():
@@ -488,8 +565,10 @@ def main() -> None:
         args.run_name,
         resume=args.resume,
         validation_metric=args.validation_metric,
+        best_metric=args.best_metric,
         use_tensorboard=not args.no_tensorboard,
         use_wandb=args.wandb,
+        log_file=args.log_file,
     )
     print(summary)
 

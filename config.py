@@ -76,7 +76,8 @@ class Config:
     eval_interval: int = 0
     eval_episodes: int = 0
     log_interval: int = 10
-    save_interval: int = 100
+    checkpoint_episode_interval: int = 100
+    best_metric: str = "episode_reward"
     validation_seed: int = 700
     test_seed: int = 500
     randomize_train_targets: bool = True

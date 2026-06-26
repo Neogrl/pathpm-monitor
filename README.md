@@ -17,7 +17,7 @@ Smoke commands:
 
 ```powershell
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' run_smoke.py --episodes 2 --steps 10 --seed 1 --device cpu
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 2 --steps 5 --seed 2 --run-name smoke_ppo --episodes-per-collection 1 --rollout-workers 1 --ppo-minibatch-size 8 --ppo-update-epochs 2 --log-interval 1 --save-interval 1 --device cpu
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 2 --steps 5 --seed 2 --run-name smoke_ppo --episodes-per-collection 1 --rollout-workers 1 --ppo-minibatch-size 8 --ppo-update-epochs 2 --log-interval 1 --checkpoint-episode-interval 1 --device cpu
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 2 --steps 5 --seed 500 --checkpoint training_output/smoke_ppo/latest.pt --device cpu
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' evaluate.py --episodes 1 --seed 600 --baseline heuristic --out-dir evaluation_runs/heuristic_smoke
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' pretrain_checks.py --episodes 20 --steps 60 --seed 900 --out-dir diagnostic_runs/pretrain_checks
@@ -27,7 +27,7 @@ Formal PPO training:
 
 ```powershell
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --run-name ppo_formal_5k
-& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k --episodes-per-collection 16 --rollout-backend ray --rollout-workers 8 --rollout-cpus-per-worker 1 --rollout-gpus-per-worker 0 --worker-num-threads 1 --rollout-device cpu --ppo-minibatch-size 256 --ppo-update-epochs 4 --log-interval 10 --save-interval 100 --device cuda
+& 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k --episodes-per-collection 16 --rollout-backend ray --rollout-workers 8 --rollout-cpus-per-worker 1 --rollout-gpus-per-worker 0 --worker-num-threads 1 --rollout-device cpu --ppo-minibatch-size 256 --ppo-update-epochs 4 --log-interval 10 --checkpoint-episode-interval 100 --device cuda
 ```
 
 The formal PPO defaults follow STAMP where it transfers cleanly: `episodes_per_collection=16`, `ppo_minibatch_size=256`, `actor_lr=1e-4`, `ppo_update_epochs=4`, `ppo_clip_coef=0.2`, `ppo_value_coef=0.2`, no entropy bonus, `ppo_max_grad_norm=5`, and StepLR decay with `lr_decay_step=250`, `lr_decay_gamma=0.96`. `gae_lambda` remains `0.95` because CMUOMMT has delayed discovery and maintenance rewards.
@@ -41,7 +41,11 @@ tensorboard --logdir training_output\ppo_formal_5k\tensorboard
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k_wandb --wandb
 ```
 
-TensorBoard is enabled by default and writes to `training_output/<run_name>/tensorboard`. Use `--no-tensorboard` to disable it. W&B is disabled by default and enabled with `--wandb`.
+Console output is mirrored to `training_output/<run_name>/train.log` by default. Use `--log-file custom.log` to choose another filename. TensorBoard is enabled by default and writes to `training_output/<run_name>/tensorboard`. Use `--no-tensorboard` to disable it. W&B is disabled by default and enabled with `--wandb`.
+
+A collection is one rollout batch: the trainer collects `episodes_per_collection` episodes with the current policy, merges them into one rollout buffer, and then runs one PPO update phase. `--log-interval` is counted in these outer collection iterations. It controls how often `training_metrics.csv` and `training_summary.json` are flushed; TensorBoard and `train.log` are still updated every collection.
+
+Weights are saved in three ways: `latest.pt` is overwritten after every collection, `best.pt` is updated whenever `best_metric` improves, and numbered checkpoints are saved by cumulative episode count with `--checkpoint-episode-interval` such as every 100 episodes. `--save-interval` is kept only as a deprecated alias for `--checkpoint-episode-interval`.
 
 The optimized reward uses only the main task terms:
 

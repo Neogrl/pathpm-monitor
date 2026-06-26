@@ -1,15 +1,15 @@
 python train.py \
   --run-name exp_a800_v1 \
-  --updates 5000 \
-  --steps 256 \
-  --episodes-per-collection 32 \
+  --updates 1000 \
+  --steps 128 \
+  --episodes-per-collection 16 \
   --rollout-backend ray \
   --rollout-workers 16 \
   --rollout-cpus-per-worker 1 \
   --rollout-gpus-per-worker 0 \
   --worker-num-threads 1 \
   --rollout-device cpu \
-  --ppo-minibatch-size 512 \
+  --ppo-minibatch-size 128 \
   --ppo-update-epochs 4 \
   --device cuda \
   --log-interval 10 \
