@@ -1633,7 +1633,7 @@ padding local node、不可达 local waypoint、已被其他 UAV 选择的 local
 replay_size = 100000
 minimum_buffer_size = 5000
 batch_size = 64
-updates_per_collection = 4
+episodes_per_collection = 4
 ```
 
 ### 12.3 Actor 更新

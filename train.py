@@ -1,9 +1,31 @@
 import argparse
 import csv
+import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+
+THREAD_ENV_DEFAULTS = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+
+
+def configure_thread_env(num_threads: int, overwrite: bool = False) -> None:
+    value = str(max(int(num_threads), 1))
+    for env_name in THREAD_ENV_DEFAULTS:
+        if overwrite:
+            os.environ[env_name] = value
+        else:
+            os.environ.setdefault(env_name, value)
+
+
+configure_thread_env(1)
 
 import numpy as np
 import torch
@@ -143,9 +165,36 @@ def rollout_state_dict(actor: OptionActor) -> dict[str, torch.Tensor]:
     return {key: value.detach().cpu() for key, value in actor.state_dict().items()}
 
 
+def configure_torch_threads(num_threads: int) -> None:
+    torch.set_num_threads(max(int(num_threads), 1))
+    try:
+        torch.set_num_interop_threads(max(int(num_threads), 1))
+    except RuntimeError:
+        pass
+
+
+class StampStyleRolloutRunner:
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        configure_thread_env(cfg.worker_num_threads, overwrite=True)
+        configure_torch_threads(cfg.worker_num_threads)
+        self.device = torch.device(cfg.rollout_device)
+        self.actor = OptionActor(cfg).to(self.device)
+        self.actor.eval()
+        self.worker = RolloutWorker(cfg, actor=self.actor, device=self.device)
+
+    def run_episode(self, state_dict: dict[str, torch.Tensor], seed: int) -> tuple[int, dict, list[dict]]:
+        self.actor.load_state_dict(state_dict)
+        self.actor.eval()
+        rollout = PPORolloutBuffer()
+        row = self.worker.run_episode(seed, replay=rollout, greedy=False, randomize_targets=True)
+        return seed, row, rollout.data
+
+
 def collect_rollout_episode(args: tuple[Config, dict[str, torch.Tensor], int, str]) -> tuple[int, dict, list[dict]]:
     cfg, state_dict, seed, rollout_device = args
-    torch.set_num_threads(1)
+    configure_thread_env(cfg.worker_num_threads, overwrite=True)
+    configure_torch_threads(cfg.worker_num_threads)
     device = torch.device(rollout_device)
     actor = OptionActor(cfg).to(device)
     actor.load_state_dict(state_dict)
@@ -160,17 +209,17 @@ def collect_rollouts(
     cfg: Config,
     trainer: Trainer,
     episode_seed: int,
-    executor: Optional[ProcessPoolExecutor],
+    rollout_pool: Optional[dict[str, Any]],
     update_label: str,
 ) -> tuple[PPORolloutBuffer, list[dict], int]:
-    n_episodes = max(cfg.updates_per_collection, 1)
+    n_episodes = max(cfg.episodes_per_collection, 1)
     seeds = [episode_seed + i for i in range(n_episodes)]
     rollout = PPORolloutBuffer()
     episode_rows: list[dict] = []
     state_dict = rollout_state_dict(trainer.actor)
     worker_count = min(max(cfg.rollout_workers, 1), n_episodes)
 
-    if worker_count <= 1 or executor is None:
+    if worker_count <= 1 or rollout_pool is None:
         device = torch.device(cfg.rollout_device)
         actor = OptionActor(cfg).to(device)
         actor.load_state_dict(state_dict)
@@ -183,8 +232,27 @@ def collect_rollouts(
             print(f"[train] {update_label}: episode done {format_progress(row)}", flush=True)
         return rollout, episode_rows, episode_seed + n_episodes
 
+    if rollout_pool["backend"] == "ray":
+        ray = rollout_pool["ray"]
+        handles = rollout_pool["handles"]
+        state_ref = ray.put(state_dict)
+        print(
+            f"[train] {update_label}: ray rollout episodes={n_episodes} workers={len(handles)} "
+            f"cpus_per_worker={cfg.rollout_cpus_per_worker} gpus_per_worker={cfg.rollout_gpus_per_worker} "
+            f"threads_per_worker={cfg.worker_num_threads} device={cfg.rollout_device}",
+            flush=True,
+        )
+        futures = [handles[i % len(handles)].run_episode.remote(state_ref, seed) for i, seed in enumerate(seeds)]
+        for ep_i, (seed, row, transitions) in enumerate(ray.get(futures), start=1):
+            rollout.extend(transitions)
+            episode_rows.append(row)
+            print(f"[train] {update_label}: episode {ep_i}/{n_episodes} seed={seed} done {format_progress(row)}", flush=True)
+        return rollout, episode_rows, episode_seed + n_episodes
+
+    executor = rollout_pool["executor"]
     print(
-        f"[train] {update_label}: parallel rollout episodes={n_episodes} workers={worker_count} device={cfg.rollout_device}",
+        f"[train] {update_label}: process rollout episodes={n_episodes} workers={worker_count} "
+        f"threads_per_worker={cfg.worker_num_threads} device={cfg.rollout_device}",
         flush=True,
     )
     jobs = [(cfg, state_dict, seed, cfg.rollout_device) for seed in seeds]
@@ -193,6 +261,47 @@ def collect_rollouts(
         episode_rows.append(row)
         print(f"[train] {update_label}: episode {ep_i}/{n_episodes} seed={seed} done {format_progress(row)}", flush=True)
     return rollout, episode_rows, episode_seed + n_episodes
+
+
+def create_rollout_pool(cfg: Config, worker_count: int) -> Optional[dict[str, Any]]:
+    if worker_count <= 1:
+        return None
+    backend = cfg.rollout_backend.lower()
+    configure_thread_env(cfg.worker_num_threads, overwrite=True)
+    if backend == "ray":
+        try:
+            import ray
+        except ImportError as exc:
+            raise RuntimeError("rollout_backend='ray' requires ray. Install ray or use --rollout-backend process.") from exc
+        thread_env = {env_name: str(max(int(cfg.worker_num_threads), 1)) for env_name in THREAD_ENV_DEFAULTS}
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True, include_dashboard=False)
+            started_ray = True
+        else:
+            started_ray = False
+        runner_cls = ray.remote(
+            num_cpus=cfg.rollout_cpus_per_worker,
+            num_gpus=cfg.rollout_gpus_per_worker,
+            runtime_env={"env_vars": thread_env},
+        )(StampStyleRolloutRunner)
+        handles = [runner_cls.remote(cfg) for _ in range(worker_count)]
+        return {"backend": "ray", "ray": ray, "handles": handles, "started_ray": started_ray}
+    if backend == "process":
+        return {"backend": "process", "executor": ProcessPoolExecutor(max_workers=worker_count)}
+    raise ValueError(f"Unknown rollout_backend={cfg.rollout_backend!r}; expected 'ray' or 'process'.")
+
+
+def close_rollout_pool(pool: Optional[dict[str, Any]]) -> None:
+    if pool is None:
+        return
+    if pool["backend"] == "ray":
+        ray = pool["ray"]
+        for handle in pool["handles"]:
+            ray.kill(handle, no_restart=True)
+        if pool.get("started_ray"):
+            ray.shutdown()
+        return
+    pool["executor"].shutdown(wait=True, cancel_futures=True)
 
 
 def evaluate_actor(cfg: Config, trainer: Trainer, episodes: int, seed: int) -> dict:
@@ -222,14 +331,18 @@ def train(
     use_wandb: bool = False,
 ) -> dict:
     cfg.episode_steps = steps
+    configure_thread_env(cfg.worker_num_threads, overwrite=True)
+    configure_torch_threads(cfg.worker_num_threads)
     out = ensure_output_dir(cfg, run_name)
     write_json(out / "config.json", asdict(cfg))
     logger = TrainingLogger(out, run_name, use_tensorboard=use_tensorboard, use_wandb=use_wandb)
     print(
         "[train] start "
         f"run_name={run_name} updates={updates} steps={steps} seed={seed} device={cfg.device} "
-        f"updates_per_collection={cfg.updates_per_collection} ppo_epochs={cfg.ppo_update_epochs} "
-        f"ppo_minibatch_size={cfg.ppo_minibatch_size} rollout_workers={cfg.rollout_workers} "
+        f"episodes_per_collection={cfg.episodes_per_collection} ppo_epochs={cfg.ppo_update_epochs} "
+        f"ppo_minibatch_size={cfg.ppo_minibatch_size} rollout_backend={cfg.rollout_backend} "
+        f"rollout_workers={cfg.rollout_workers} rollout_cpus_per_worker={cfg.rollout_cpus_per_worker} "
+        f"rollout_gpus_per_worker={cfg.rollout_gpus_per_worker} worker_num_threads={cfg.worker_num_threads} "
         f"rollout_device={cfg.rollout_device} eval_interval={cfg.eval_interval} "
         f"eval_episodes={cfg.eval_episodes} log_interval={cfg.log_interval} save_interval={cfg.save_interval} "
         f"tensorboard={use_tensorboard} wandb={use_wandb} out={out}",
@@ -247,13 +360,13 @@ def train(
     episode_seed = seed
     best_value = -float("inf")
     best_summary = {}
-    worker_count = min(max(cfg.rollout_workers, 1), max(cfg.updates_per_collection, 1))
-    executor = ProcessPoolExecutor(max_workers=worker_count) if worker_count > 1 else None
+    worker_count = min(max(cfg.rollout_workers, 1), max(cfg.episodes_per_collection, 1))
+    rollout_pool = create_rollout_pool(cfg, worker_count)
     try:
         for update in range(updates):
             update_label = f"update {update + 1}/{updates}"
             print(f"[train] {update_label}: collect rollout", flush=True)
-            rollout, episode_rows, episode_seed = collect_rollouts(cfg, trainer, episode_seed, executor, update_label)
+            rollout, episode_rows, episode_seed = collect_rollouts(cfg, trainer, episode_seed, rollout_pool, update_label)
             episode_metrics = aggregate_dicts(episode_rows)
             print(f"[train] update {update + 1}/{updates}: ppo update rollout_size={len(rollout)}", flush=True)
             train_stats = trainer.update(rollout).__dict__
@@ -300,8 +413,7 @@ def train(
                     write_json(out / "best_summary.json", best_summary)
                 print(f"[train] update {update + 1}/{updates}: wrote metrics rows={len(rows)}", flush=True)
     finally:
-        if executor is not None:
-            executor.shutdown(wait=True, cancel_futures=True)
+        close_rollout_pool(rollout_pool)
         logger.close()
 
     return rows[-1] if rows else {}
@@ -316,9 +428,14 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None, help="Deprecated alias for --ppo-minibatch-size.")
     parser.add_argument("--ppo-minibatch-size", type=int, default=None)
     parser.add_argument("--ppo-update-epochs", type=int, default=None)
-    parser.add_argument("--updates-per-collection", type=int, default=None)
+    parser.add_argument("--episodes-per-collection", type=int, default=None)
+    parser.add_argument("--updates-per-collection", type=int, default=None, help="Deprecated alias for --episodes-per-collection.")
+    parser.add_argument("--rollout-backend", type=str, choices=["ray", "process"], default=None)
     parser.add_argument("--rollout-workers", type=int, default=None)
     parser.add_argument("--rollout-device", type=str, default=None)
+    parser.add_argument("--rollout-cpus-per-worker", type=float, default=None)
+    parser.add_argument("--rollout-gpus-per-worker", type=float, default=None)
+    parser.add_argument("--worker-num-threads", type=int, default=None)
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-episodes", type=int, default=None)
     parser.add_argument("--log-interval", type=int, default=None)
@@ -337,12 +454,21 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = Config()
+    episodes_per_collection = (
+        args.episodes_per_collection
+        if args.episodes_per_collection is not None
+        else args.updates_per_collection
+    )
     overrides = {
         "ppo_minibatch_size": args.ppo_minibatch_size or args.batch_size,
         "ppo_update_epochs": args.ppo_update_epochs,
-        "updates_per_collection": args.updates_per_collection,
+        "episodes_per_collection": episodes_per_collection,
+        "rollout_backend": args.rollout_backend,
         "rollout_workers": args.rollout_workers,
         "rollout_device": args.rollout_device,
+        "rollout_cpus_per_worker": args.rollout_cpus_per_worker,
+        "rollout_gpus_per_worker": args.rollout_gpus_per_worker,
+        "worker_num_threads": args.worker_num_threads,
         "eval_interval": args.eval_interval,
         "eval_episodes": args.eval_episodes,
         "log_interval": args.log_interval,

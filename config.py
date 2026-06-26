@@ -63,9 +63,13 @@ class Config:
     ppo_update_epochs: int = 4
     ppo_minibatch_size: int = 256
     ppo_max_grad_norm: float = 5.00
-    updates_per_collection: int = 16
+    episodes_per_collection: int = 16
+    rollout_backend: str = "ray"
     rollout_workers: int = 8
     rollout_device: str = "cpu"
+    rollout_cpus_per_worker: float = 1.0
+    rollout_gpus_per_worker: float = 0.0
+    worker_num_threads: int = 1
     actor_lr: float = 1e-4
     lr_decay_step: int = 250
     lr_decay_gamma: float = 0.96
