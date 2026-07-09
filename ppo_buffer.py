@@ -25,29 +25,36 @@ class PPORolloutBuffer:
 
     def tensors(self, gamma: float, gae_lambda: float, device: torch.device) -> dict[str, torch.Tensor]:
         values = self._stack("values").astype(np.float32)
+        if self.data and "next_values" in self.data[0]:
+            next_values_arr = self._stack("next_values").astype(np.float32)
+        else:
+            next_values_arr = np.zeros_like(values, dtype=np.float32)
+            if len(values) > 1:
+                next_values_arr[:-1] = values[1:]
         rewards = self._stack("reward").astype(np.float32).reshape(-1)
         dones = self._stack("done").astype(np.float32).reshape(-1)
         t, n = values.shape
         advantages = np.zeros((t, n), dtype=np.float32)
         last_gae = np.zeros(n, dtype=np.float32)
         for step in range(t - 1, -1, -1):
-            if step == t - 1:
-                next_values = np.zeros(n, dtype=np.float32)
-            else:
-                next_values = values[step + 1]
             next_nonterminal = 1.0 - dones[step]
-            delta = rewards[step] + gamma * next_values * next_nonterminal - values[step]
+            delta = rewards[step] + gamma * next_values_arr[step] * next_nonterminal - values[step]
             last_gae = delta + gamma * gae_lambda * next_nonterminal * last_gae
             advantages[step] = last_gae
         returns = advantages + values
 
         keys = [
+            "global_node_inputs",
+            "global_edge_mask",
+            "global_node_padding_mask",
+            "current_node_indices",
+            "candidate_node_indices",
+            "candidate_padding_mask",
+            "action_mask",
             "node_inputs",
             "node_padding_mask",
-            "action_mask",
             "uav_state",
             "prev_option",
-            "team_summary",
             "actions",
             "terminations",
             "log_probs",
@@ -66,15 +73,24 @@ class PPORolloutBuffer:
         out["advantages"] = torch.as_tensor(advantages, device=device).float()
         out["returns"] = torch.as_tensor(returns, device=device).float()
         out["values"] = torch.as_tensor(values, device=device).float()
+        out["next_values"] = torch.as_tensor(next_values_arr, device=device).float()
         out["rewards"] = torch.as_tensor(rewards, device=device).float()
         return out
 
     @staticmethod
-    def minibatches(tensors: dict[str, torch.Tensor], minibatch_size: int) -> Iterator[dict[str, torch.Tensor]]:
+    def minibatches(
+        tensors: dict[str, torch.Tensor],
+        minibatch_size: int,
+        num_minibatches: int = 0,
+    ) -> Iterator[dict[str, torch.Tensor]]:
         size = tensors["actions"].shape[0]
         indices = np.arange(size)
         np.random.shuffle(indices)
-        step = max(1, min(minibatch_size, size))
-        for start in range(0, size, step):
-            idx = torch.as_tensor(indices[start : start + step], device=tensors["actions"].device).long()
+        if num_minibatches and num_minibatches > 0:
+            sampler = [chunk for chunk in np.array_split(indices, num_minibatches) if len(chunk) > 0]
+        else:
+            step = max(1, min(minibatch_size, size))
+            sampler = [indices[start : start + step] for start in range(0, size, step)]
+        for batch_indices in sampler:
+            idx = torch.as_tensor(batch_indices, device=tensors["actions"].device).long()
             yield {key: value.index_select(0, idx) for key, value in tensors.items()}

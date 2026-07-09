@@ -17,7 +17,7 @@ import numpy as np
 from baselines import HeuristicBaseline
 from config import Config
 from environment import CMUOMMTEnv
-from nodes import NodeBuilder
+from nodes import NODE_INPUT_INDEX, NodeBuilder
 from pseudo_tracks import PseudoTrackMemory
 from search_belief import SearchBelief
 from target_belief import TargetBelief
@@ -52,17 +52,22 @@ def plot_fov(ax, positions: np.ndarray, cfg: Config, alpha: float = 0.12) -> Non
 
 
 def init_stack(cfg: Config, seed: int, n_targets: int):
+    builder = NodeBuilder(cfg)
+    builder.reset(seed=seed)
+    start_rng = np.random.default_rng(seed + 909)
+    uav_positions = builder.graph.sample_start_positions(cfg.n_uavs, start_rng)
+    builder.reset(seed=seed, start_positions=uav_positions)
     env = CMUOMMTEnv(cfg)
-    env.reset(seed=seed, n_targets=n_targets)
+    env.reset(seed=seed, n_targets=n_targets, uav_positions=uav_positions)
     target = TargetBelief(cfg, eval_mode=True)
     target.reset(seed=seed + 101)
     search = SearchBelief(cfg)
     tracks = PseudoTrackMemory(cfg)
-    return env, target, search, tracks
+    return env, target, search, tracks, builder
 
 
 def draw_initial_scene(cfg: Config, out: Path, seed: int, n_targets: int) -> dict:
-    env, _, _, _ = init_stack(cfg, seed, n_targets)
+    env, _, _, _, _ = init_stack(cfg, seed, n_targets)
     fig, ax = plt.subplots(figsize=(7, 7), dpi=150)
     setup_axes(ax, cfg, f"Initial scene, seed={seed}")
     plot_fov(ax, env.uav_positions, cfg)
@@ -87,9 +92,7 @@ def draw_initial_scene(cfg: Config, out: Path, seed: int, n_targets: int) -> dic
 
 
 def rollout_heuristic(cfg: Config, seed: int, n_targets: int, steps: int):
-    env, target, search, tracks = init_stack(cfg, seed, n_targets)
-    builder = NodeBuilder(cfg)
-    builder.reset()
+    env, target, search, tracks, builder = init_stack(cfg, seed, n_targets)
     baseline = HeuristicBaseline()
     rng = np.random.default_rng(seed + 303)
     uav_traj = [env.uav_positions.copy()]
@@ -116,6 +119,7 @@ def rollout_heuristic(cfg: Config, seed: int, n_targets: int, steps: int):
         "target": target,
         "search": search,
         "tracks": tracks,
+        "builder": builder,
         "last_batch": last_batch,
         "uav_traj": np.asarray(uav_traj),
         "target_traj": np.asarray(target_traj),
@@ -160,8 +164,7 @@ def draw_candidate_nodes(cfg: Config, out: Path, seed: int, n_targets: int, warm
     target = data["target"]
     search = data["search"]
     tracks = data["tracks"]
-    builder = NodeBuilder(cfg)
-    builder.reset()
+    builder = data["builder"]
     batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
     fig, axes = plt.subplots(1, cfg.n_uavs, figsize=(5.4 * cfg.n_uavs, 5.2), dpi=150)
     if cfg.n_uavs == 1:
@@ -179,11 +182,11 @@ def draw_candidate_nodes(cfg: Config, out: Path, seed: int, n_targets: int, warm
         features = batch.node_inputs[i, valid]
         type_counts = {"target": 0, "search": 0, "maintenance": 0, "graph_neighbor": 0}
         for point, feat in zip(points, features):
-            if feat[12] > 0.5:
+            if feat[NODE_INPUT_INDEX["target_flag"]] > 0.5:
                 color, marker, key = COLORS["target"], "P", "target"
-            elif feat[14] > 0.5:
+            elif feat[NODE_INPUT_INDEX["maintenance_flag"]] > 0.5:
                 color, marker, key = COLORS["maintenance"], "D", "maintenance"
-            elif feat[13] > 0.5:
+            elif feat[NODE_INPUT_INDEX["search_flag"]] > 0.5:
                 color, marker, key = COLORS["search"], "s", "search"
             else:
                 color, marker, key = COLORS["local"], ".", "graph_neighbor"

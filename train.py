@@ -84,7 +84,7 @@ class TrainingLogger:
             return "val"
         if key.startswith("reward_"):
             return "reward_terms"
-        if key in {"policy_loss", "value_loss", "entropy", "approx_kl", "clipfrac", "loss", "grad_norm", "switch_loss", "learning_rate"}:
+        if key in {"policy_loss", "value_loss", "entropy", "approx_kl", "clipfrac", "loss", "grad_norm", "ratio", "value_clipfrac", "switch_loss", "learning_rate"}:
             return "ppo"
         if key in {"mean_beta", "switch_rate", "option_0_ratio", "option_1_ratio"}:
             return "options"
@@ -114,18 +114,34 @@ class TeeStream:
     def __init__(self, *streams: TextIO):
         self.streams = streams
 
+    def __getattr__(self, name: str):
+        return getattr(self.streams[0], name)
+
     def write(self, text: str) -> int:
         for stream in self.streams:
-            stream.write(text)
-            stream.flush()
+            try:
+                if getattr(stream, "closed", False):
+                    continue
+                stream.write(text)
+                stream.flush()
+            except ValueError:
+                continue
         return len(text)
 
     def flush(self) -> None:
         for stream in self.streams:
-            stream.flush()
+            try:
+                if getattr(stream, "closed", False):
+                    continue
+                stream.flush()
+            except ValueError:
+                continue
 
     def isatty(self) -> bool:
         return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+    def fileno(self) -> int:
+        return self.streams[0].fileno()
 
 
 class ConsoleLogCapture:
@@ -389,12 +405,22 @@ def train(
             "[train] start "
             f"run_name={run_name} updates={updates} steps={steps} seed={seed} device={cfg.device} "
             f"episodes_per_collection={cfg.episodes_per_collection} ppo_epochs={cfg.ppo_update_epochs} "
-            f"ppo_minibatch_size={cfg.ppo_minibatch_size} rollout_backend={cfg.rollout_backend} "
+            f"ppo_num_minibatches={cfg.ppo_num_minibatches} ppo_minibatch_size={cfg.ppo_minibatch_size} "
+            f"use_clipped_value_loss={cfg.use_clipped_value_loss} use_huber_loss={cfg.use_huber_loss} "
+            f"huber_delta={cfg.huber_delta} actor_lr={cfg.actor_lr} critic_lr={cfg.critic_lr} "
+            f"adam_eps={cfg.adam_eps} reward_overlap_weight={cfg.reward_overlap_weight} "
+            f"reward_cost_weight={cfg.reward_cost_weight} "
+            f"graph_type={cfg.graph_type} prm_random_nodes={cfg.prm_random_nodes} "
+            f"prm_sampling={cfg.prm_sampling} prm_jitter_ratio={cfg.prm_jitter_ratio} "
+            f"prm_boundary_points_per_side={cfg.prm_boundary_points_per_side} prm_edge_radius={cfg.prm_edge_radius} "
+            f"obstacles_enabled={cfg.obstacles_enabled} obstacle_count={cfg.obstacle_count} "
+            f"rollout_backend={cfg.rollout_backend} "
             f"rollout_workers={cfg.rollout_workers} rollout_cpus_per_worker={cfg.rollout_cpus_per_worker} "
             f"rollout_gpus_per_worker={cfg.rollout_gpus_per_worker} worker_num_threads={cfg.worker_num_threads} "
             f"rollout_device={cfg.rollout_device} eval_interval={cfg.eval_interval} "
             f"eval_episodes={cfg.eval_episodes} log_interval={cfg.log_interval} "
             f"checkpoint_episode_interval={cfg.checkpoint_episode_interval} best_metric={best_metric or cfg.best_metric} "
+            f"disable_options={cfg.disable_options} disable_termination={cfg.disable_termination} "
             f"tensorboard={use_tensorboard} wandb={use_wandb} out={out}",
             flush=True,
         )
@@ -456,7 +482,7 @@ def train(
                     print(f"[train] update {update + 1}/{updates}: saved best {metric_name}={best_value:.4f}", flush=True)
 
                 rows.append(row)
-                logger.log(row, trainer.update_count)
+                logger.log(row, completed_episodes)
                 print(f"[train] update {update + 1}/{updates}: done {format_progress(row)}", flush=True)
                 trainer.save(latest_path)
                 print(f"[train] update {update + 1}/{updates}: saved latest update_count={trainer.update_count}", flush=True)
@@ -495,7 +521,29 @@ def main() -> None:
     parser.add_argument("--run-name", type=str, default="default")
     parser.add_argument("--batch-size", type=int, default=None, help="Deprecated alias for --ppo-minibatch-size.")
     parser.add_argument("--ppo-minibatch-size", type=int, default=None)
+    parser.add_argument("--ppo-num-minibatches", type=int, default=None)
     parser.add_argument("--ppo-update-epochs", type=int, default=None)
+    parser.add_argument("--ppo-entropy-coef", type=float, default=None)
+    parser.add_argument("--critic-lr", type=float, default=None)
+    parser.add_argument("--adam-eps", type=float, default=None)
+    parser.add_argument("--huber-delta", type=float, default=None)
+    parser.add_argument("--reward-overlap-weight", type=float, default=None)
+    parser.add_argument("--reward-cost-weight", type=float, default=None)
+    parser.add_argument("--graph-type", type=str, choices=["grid", "prm"], default=None)
+    parser.add_argument("--prm-random-nodes", type=int, default=None)
+    parser.add_argument("--prm-sampling", type=str, choices=["stratified", "uniform"], default=None)
+    parser.add_argument("--prm-jitter-ratio", type=float, default=None)
+    parser.add_argument("--prm-boundary-points-per-side", type=int, default=None)
+    parser.add_argument("--prm-edge-radius", type=float, default=None)
+    parser.add_argument("--prm-min-node-distance", type=float, default=None)
+    parser.add_argument("--no-prm-boundary", action="store_true")
+    parser.add_argument("--obstacles", action="store_true")
+    parser.add_argument("--obstacle-count", type=int, default=None)
+    parser.add_argument("--obstacle-radius-min", type=float, default=None)
+    parser.add_argument("--obstacle-radius-max", type=float, default=None)
+    parser.add_argument("--obstacle-margin", type=float, default=None)
+    parser.add_argument("--no-clipped-value-loss", action="store_true")
+    parser.add_argument("--no-huber-loss", action="store_true")
     parser.add_argument("--episodes-per-collection", type=int, default=None)
     parser.add_argument("--updates-per-collection", type=int, default=None, help="Deprecated alias for --episodes-per-collection.")
     parser.add_argument("--rollout-backend", type=str, choices=["ray", "process"], default=None)
@@ -516,6 +564,7 @@ def main() -> None:
     parser.add_argument("--validation-metric", type=str, default="val_discovery_rate")
     parser.add_argument("--no-tensorboard", action="store_true")
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--use-option-critic", action="store_true", help="Enable learned option and termination heads. Disabled by default for stage 1.")
     parser.add_argument(
         "--ablation",
         type=str,
@@ -535,9 +584,31 @@ def main() -> None:
         if args.checkpoint_episode_interval is not None
         else args.save_interval
     )
+    requested_ppo_minibatch_size = args.ppo_minibatch_size or args.batch_size
+    requested_ppo_num_minibatches = args.ppo_num_minibatches
+    if requested_ppo_minibatch_size is not None and requested_ppo_num_minibatches is None:
+        requested_ppo_num_minibatches = 0
     overrides = {
-        "ppo_minibatch_size": args.ppo_minibatch_size or args.batch_size,
+        "ppo_minibatch_size": requested_ppo_minibatch_size,
+        "ppo_num_minibatches": requested_ppo_num_minibatches,
         "ppo_update_epochs": args.ppo_update_epochs,
+        "ppo_entropy_coef": args.ppo_entropy_coef,
+        "critic_lr": args.critic_lr,
+        "adam_eps": args.adam_eps,
+        "huber_delta": args.huber_delta,
+        "reward_overlap_weight": args.reward_overlap_weight,
+        "reward_cost_weight": args.reward_cost_weight,
+        "graph_type": args.graph_type,
+        "prm_random_nodes": args.prm_random_nodes,
+        "prm_sampling": args.prm_sampling,
+        "prm_jitter_ratio": args.prm_jitter_ratio,
+        "prm_boundary_points_per_side": args.prm_boundary_points_per_side,
+        "prm_edge_radius": args.prm_edge_radius,
+        "prm_min_node_distance": args.prm_min_node_distance,
+        "obstacle_count": args.obstacle_count,
+        "obstacle_radius_min": args.obstacle_radius_min,
+        "obstacle_radius_max": args.obstacle_radius_max,
+        "obstacle_margin": args.obstacle_margin,
         "episodes_per_collection": episodes_per_collection,
         "rollout_backend": args.rollout_backend,
         "rollout_workers": args.rollout_workers,
@@ -555,6 +626,17 @@ def main() -> None:
     for key, value in overrides.items():
         if value is not None:
             setattr(cfg, key, value)
+    if args.use_option_critic:
+        cfg.disable_options = False
+        cfg.disable_termination = False
+    if args.no_clipped_value_loss:
+        cfg.use_clipped_value_loss = False
+    if args.no_huber_loss:
+        cfg.use_huber_loss = False
+    if args.no_prm_boundary:
+        cfg.prm_include_boundary = False
+    if args.obstacles:
+        cfg.obstacles_enabled = True
     apply_ablation(cfg, args.ablation)
 
     summary = train(

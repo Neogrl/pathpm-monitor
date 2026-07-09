@@ -1,0 +1,5 @@
+numpy>=1.23
+torch>=2.0
+ray[default]>=2.0
+matplotlib>=3.6
+tensorboard>=2.12

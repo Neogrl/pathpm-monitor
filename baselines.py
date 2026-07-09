@@ -1,7 +1,16 @@
 import numpy as np
 
 from config import Config
-from nodes import NodeBuilder
+from nodes import NODE_INPUT_INDEX
+
+
+COVERAGE_AGE_VALUE = NODE_INPUT_INDEX["coverage_age_value"]
+OVERLAP = NODE_INPUT_INDEX["overlap"]
+DISTANCE = NODE_INPUT_INDEX["candidate_distance_norm"]
+
+
+def coverage_score(features: np.ndarray) -> np.ndarray:
+    return features[:, COVERAGE_AGE_VALUE] - 0.5 * features[:, OVERLAP] - 0.05 * features[:, DISTANCE]
 
 
 class RandomBaseline:
@@ -22,7 +31,7 @@ class HeuristicBaseline:
                 actions[i] = 0
                 continue
             features = batch.node_inputs[i, valid]
-            score = 1.3 * features[:, 5] + 1.0 * features[:, 8] + 1.1 * features[:, 11] - 0.6 * features[:, 10] - 0.05 * features[:, 2]
+            score = coverage_score(features)
             actions[i] = int(valid[np.argmax(score)])
         return actions
 
@@ -35,7 +44,7 @@ class CoverageBaseline:
             if len(valid) == 0:
                 continue
             features = batch.node_inputs[i, valid]
-            score = features[:, 9] - 0.5 * features[:, 10] - 0.03 * features[:, 2]
+            score = coverage_score(features)
             actions[i] = int(valid[np.argmax(score)])
         return actions
 
@@ -48,7 +57,7 @@ class SearchGreedyBaseline:
             if len(valid) == 0:
                 continue
             features = batch.node_inputs[i, valid]
-            score = features[:, 8] + 0.5 * features[:, 13] - 0.4 * features[:, 10] - 0.03 * features[:, 2]
+            score = coverage_score(features)
             actions[i] = int(valid[np.argmax(score)])
         return actions
 
@@ -61,6 +70,6 @@ class PHDGreedyBaseline:
             if len(valid) == 0:
                 continue
             features = batch.node_inputs[i, valid]
-            score = features[:, 5] + 0.5 * features[:, 12] - 0.4 * features[:, 10] - 0.03 * features[:, 2]
+            score = coverage_score(features)
             actions[i] = int(valid[np.argmax(score)])
         return actions

@@ -68,14 +68,17 @@ def record_snapshot(cfg: Config, env: CMUOMMTEnv, target: TargetBelief, measurem
 
 
 def run_rollout(cfg: Config, seed: int, n_targets: int, steps: int, frames: list[int]) -> tuple[list[dict], list[dict]]:
+    builder = NodeBuilder(cfg)
+    builder.reset(seed=seed)
+    start_rng = np.random.default_rng(seed + 909)
+    uav_positions = builder.graph.sample_start_positions(cfg.n_uavs, start_rng)
+    builder.reset(seed=seed, start_positions=uav_positions)
     env = CMUOMMTEnv(cfg)
-    env.reset(seed=seed, n_targets=n_targets)
+    env.reset(seed=seed, n_targets=n_targets, uav_positions=uav_positions)
     target = TargetBelief(cfg, eval_mode=True)
     target.reset(seed=seed + 101)
     search = SearchBelief(cfg)
     tracks = PseudoTrackMemory(cfg)
-    builder = NodeBuilder(cfg)
-    builder.reset()
     baseline = HeuristicBaseline()
     rng = np.random.default_rng(seed + 303)
 

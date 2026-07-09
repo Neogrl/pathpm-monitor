@@ -13,8 +13,7 @@ def reward_terms(
     detected_count: int,
     newly_discovered: int,
     continuous_observed: int,
-    previous_search_mean: float,
-    current_search_mean: float,
+    previous_coverage_age: np.ndarray,
     uav_positions: np.ndarray,
     step_distance: np.ndarray,
     option_switched: np.ndarray,
@@ -32,17 +31,36 @@ def reward_terms(
     for i in range(len(uav_positions)):
         for j in range(i + 1, len(uav_positions)):
             overlaps.append(circle_overlap_area(np.linalg.norm(uav_positions[i] - uav_positions[j]), cfg.fov_radius) / cfg.fov_area)
+    coverage = coverage_age_progress(cfg, previous_coverage_age, uav_positions)
     return {
         "observe": detected_count / max(n_targets, 1),
         "discover": newly_discovered / max(n_targets, 1),
         "fairness": fairness,
         "continuity": continuous_observed / max(discovered_count, 1),
-        "search": max(0.0, previous_search_mean - current_search_mean),
+        "search": coverage,
+        "coverage": coverage,
         "overlap": float(np.mean(overlaps)) if overlaps else 0.0,
         "miss": miss,
         "cost": float(np.mean(step_distance / max(cfg.uav_speed, 1e-8))),
         "switch": float(np.mean(option_switched)),
     }
+
+
+def coverage_age_progress(cfg: Config, previous_coverage_age: np.ndarray, uav_positions: np.ndarray) -> float:
+    if getattr(cfg, "disable_search_belief", False):
+        return 0.0
+    age = np.asarray(previous_coverage_age, dtype=np.float32)
+    if age.size == 0:
+        return 0.0
+    xs = (np.arange(cfg.search_bins) + 0.5) * cfg.cell_size
+    ys = (np.arange(cfg.search_bins) + 0.5) * cfg.cell_size
+    xx, yy = np.meshgrid(xs, ys)
+    centers = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=1).astype(np.float32)
+    age_value = np.clip(age.reshape(-1) / max(cfg.search_age_scale, 1e-8), 0.0, 1.0)
+    covered = np.zeros(len(age_value), dtype=bool)
+    for pos in np.asarray(uav_positions, dtype=np.float32):
+        covered |= np.linalg.norm(centers - pos[None, :], axis=1) <= cfg.fov_radius
+    return float(np.sum(age_value[covered]) / max(len(age_value), 1))
 
 
 def weighted_reward(terms: dict[str, float], cfg: Optional[Config] = None) -> float:
@@ -53,6 +71,8 @@ def weighted_reward(terms: dict[str, float], cfg: Optional[Config] = None) -> fl
         + cfg.reward_discover_weight * terms["discover"]
         + cfg.reward_continuity_weight * terms["continuity"]
         + cfg.reward_search_weight * terms["search"]
+        + cfg.reward_overlap_weight * terms["overlap"]
+        + getattr(cfg, "reward_cost_weight", 0.0) * terms["cost"]
         + cfg.reward_miss_weight * terms["miss"]
     )
 

@@ -54,14 +54,17 @@ def make_baseline(name: str):
 
 
 def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dict:
+    node_builder = NodeBuilder(cfg)
+    node_builder.reset(seed=seed)
+    start_rng = np.random.default_rng(seed + 909)
+    uav_positions = node_builder.graph.sample_start_positions(cfg.n_uavs, start_rng)
+    node_builder.reset(seed=seed, start_positions=uav_positions)
     env = CMUOMMTEnv(cfg)
-    env.reset(seed=seed)
+    env.reset(seed=seed, uav_positions=uav_positions)
     target = TargetBelief(cfg, eval_mode=True)
     target.reset(seed=seed + 101)
     search = SearchBelief(cfg)
     tracks = PseudoTrackMemory(cfg)
-    node_builder = NodeBuilder(cfg)
-    node_builder.reset()
     baseline = make_baseline(baseline_name)
     rng = np.random.default_rng(seed + 303)
     rewards = []
@@ -72,20 +75,18 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
         batch = node_builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         actions = baseline.select(cfg, batch, rng)
         selected_waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
-        prev_search = float(np.mean(search.search_belief))
+        previous_coverage_age = search.coverage_age.copy()
         info = env.step(selected_waypoints)
         target.update(info.measurements.points, env.uav_positions)
         tracks.update(env.step_count, info.measurements.points, [] if cfg.disable_phd_belief else target.peaks())
         search.update(env.uav_positions, info.measurements.points)
-        cur_search = float(np.mean(search.search_belief))
         terms = reward_terms(
             cfg,
             env.memory,
             len(info.detected_ids),
             info.newly_discovered,
             info.continuous_observed,
-            prev_search,
-            cur_search,
+            previous_coverage_age,
             env.uav_positions,
             info.step_distance,
             np.zeros(cfg.n_uavs, dtype=np.float32),
@@ -109,7 +110,14 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
     return metrics
 
 
-def evaluate_policy(cfg: Config, episodes: int, seed: int, checkpoint: Optional[str] = None, baseline: Optional[str] = None) -> dict:
+def evaluate_policy(
+    cfg: Config,
+    episodes: int,
+    seed: int,
+    checkpoint: Optional[str] = None,
+    baseline: Optional[str] = None,
+    deterministic: bool = False,
+) -> dict:
     device = torch.device(cfg.device)
     actor = None
     if checkpoint:
@@ -123,7 +131,7 @@ def evaluate_policy(cfg: Config, episodes: int, seed: int, checkpoint: Optional[
         if baseline:
             metrics.append(evaluate_baseline_episode(cfg, seed + ep, baseline))
         else:
-            metrics.append(worker.run_episode(seed + ep, greedy=True, eval_mode=True))
+            metrics.append(worker.run_episode(seed + ep, greedy=deterministic, eval_mode=True))
     keys = metrics[0].keys()
     summary = {}
     for key in keys:
@@ -138,6 +146,7 @@ def evaluate_policy(cfg: Config, episodes: int, seed: int, checkpoint: Optional[
     summary["seed"] = seed
     summary["seed_start"] = seed
     summary["seed_end"] = seed + episodes - 1
+    summary["policy_mode"] = "baseline" if baseline else ("deterministic" if deterministic else "stochastic")
     return summary
 
 
@@ -150,6 +159,24 @@ def main() -> None:
     parser.add_argument("--out-dir", type=str, default="evaluation_runs/eval")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--graph-type", type=str, choices=["grid", "prm"], default=None)
+    parser.add_argument("--prm-random-nodes", type=int, default=None)
+    parser.add_argument("--prm-sampling", type=str, choices=["stratified", "uniform"], default=None)
+    parser.add_argument("--prm-jitter-ratio", type=float, default=None)
+    parser.add_argument("--prm-boundary-points-per-side", type=int, default=None)
+    parser.add_argument("--prm-edge-radius", type=float, default=None)
+    parser.add_argument("--prm-min-node-distance", type=float, default=None)
+    parser.add_argument("--no-prm-boundary", action="store_true")
+    parser.add_argument("--obstacles", action="store_true")
+    parser.add_argument("--obstacle-count", type=int, default=None)
+    parser.add_argument("--obstacle-radius-min", type=float, default=None)
+    parser.add_argument("--obstacle-radius-max", type=float, default=None)
+    parser.add_argument("--obstacle-margin", type=float, default=None)
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Use argmax actions and beta > 0.5 terminations for checkpoint policy evaluation. Default samples from the trained PPO policy.",
+    )
     parser.add_argument(
         "--ablation",
         type=str,
@@ -162,8 +189,35 @@ def main() -> None:
         cfg.episode_steps = args.steps
     if args.device is not None:
         cfg.device = args.device
+    for key in [
+        "graph_type",
+        "prm_random_nodes",
+        "prm_sampling",
+        "prm_jitter_ratio",
+        "prm_boundary_points_per_side",
+        "prm_edge_radius",
+        "prm_min_node_distance",
+        "obstacle_count",
+        "obstacle_radius_min",
+        "obstacle_radius_max",
+        "obstacle_margin",
+    ]:
+        value = getattr(args, key)
+        if value is not None:
+            setattr(cfg, key, value)
+    if args.no_prm_boundary:
+        cfg.prm_include_boundary = False
+    if args.obstacles:
+        cfg.obstacles_enabled = True
     apply_ablation(cfg, args.ablation)
-    summary = evaluate_policy(cfg, args.episodes, args.seed, checkpoint=args.checkpoint, baseline=args.baseline)
+    summary = evaluate_policy(
+        cfg,
+        args.episodes,
+        args.seed,
+        checkpoint=args.checkpoint,
+        baseline=args.baseline,
+        deterministic=args.deterministic,
+    )
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     write_json(out / "summary.json", summary)

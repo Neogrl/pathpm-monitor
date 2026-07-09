@@ -26,11 +26,17 @@ logs/
 
 # Training outputs
 *runs*/
-outputs/
+*outputs/
+*output/
 results/
 checkpoints/
 weights/
 wandb/
+*docs/
+*doc/
+*visualizations/
+*visualization/
+
 
 # Model files
 *.pt

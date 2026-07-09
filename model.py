@@ -140,125 +140,226 @@ class OptionActor(nn.Module):
         super().__init__()
         self.cfg = cfg
         e = cfg.embed_dim
-        self.initial_embedding = nn.Linear(16, e)
-        self.encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=3)
-        self.decoder = Decoder(embedding_dim=e, n_heads=8, n_layers=1)
+        self.actor_initial_embedding = nn.Linear(cfg.node_input_dim, e)
+        # Reserved for STAMP-style graph positional encoding:
+        # self.spatio_pos_embedding = nn.Linear(cfg.graph_laplacian_pe_dim, e)
+        self.actor_encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=3)
+        self.actor_decoder = Decoder(embedding_dim=e, n_heads=8, n_layers=1)
         self.pointer = SingleHeadAttention(e)
-        self.uav_encoder = nn.Sequential(nn.Linear(4, e), nn.ReLU(inplace=True), nn.Linear(e, e))
-        self.team_encoder = nn.Sequential(nn.Linear(12, e), nn.ReLU(inplace=True), nn.Linear(e, e))
-        self.state_embedding = nn.Linear(e * 3, e)
-        self.current_embedding = nn.Linear(e * 2, e)
         self.termination_head = nn.Sequential(nn.Linear(e, 64), nn.ReLU(inplace=True), nn.Linear(64, 1))
         self.option_embedding_for_termination = nn.Embedding(2, e)
         self.option_embedding_for_policy = nn.Embedding(2, e)
-        self.value_head = nn.Sequential(nn.Linear(e * 2, e), nn.ReLU(inplace=True), nn.Linear(e, 1))
 
-    def _flat_masks(self, node_padding_mask: torch.Tensor, action_mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        b, n, m = node_padding_mask.shape
-        padding = node_padding_mask.reshape(b * n, m).bool()
-        action = (action_mask | node_padding_mask).reshape(b * n, m).bool()
-        encoder_mask = padding.unsqueeze(1).expand(-1, m, -1)
-        pointer_mask = action.unsqueeze(1)
-        return encoder_mask, pointer_mask
+        self.critic_initial_embedding = nn.Linear(cfg.node_input_dim, e)
+        self.critic_encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=3)
+        self.critic_uav_encoder = nn.Sequential(nn.Linear(cfg.uav_state_dim, e), nn.ReLU(inplace=True), nn.Linear(e, e))
+        self.critic_state_embedding = nn.Linear(e * 2, e)
+        self.value_head = nn.Sequential(nn.Linear(e, e), nn.ReLU(inplace=True), nn.Linear(e, 1))
 
-    def _encode(
+    def _global_masks(
         self,
-        node_inputs: torch.Tensor,
-        node_padding_mask: torch.Tensor,
-        action_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        b, n, m, _ = node_inputs.shape
-        flat_nodes = node_inputs.reshape(b * n, m, -1)
-        encoder_mask, pointer_mask = self._flat_masks(node_padding_mask, action_mask)
-        embedded = self.initial_embedding(flat_nodes)
-        encoded = self.encoder(embedded, encoder_mask)
-        encoded = encoded.masked_fill(node_padding_mask.reshape(b * n, m, 1).bool(), 0.0)
-        return encoded.reshape(b, n, m, -1), encoder_mask, pointer_mask
-
-    def _base_state(
-        self,
-        encoded: torch.Tensor,
-        node_padding_mask: torch.Tensor,
-        uav_state: torch.Tensor,
-        team_summary: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        b: int,
+        n: int,
+        g: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        valid = (~node_padding_mask.bool()).float().unsqueeze(-1)
-        pooled = (encoded * valid).sum(dim=2) / valid.sum(dim=2).clamp(min=1.0)
-        uav_emb = self.uav_encoder(uav_state.float())
-        team_emb = self.team_encoder(team_summary.float()).unsqueeze(1).expand_as(uav_emb)
-        base = self.state_embedding(torch.cat([pooled, uav_emb, team_emb], dim=-1))
-        return base, pooled
+        if global_edge_mask.dim() not in (2, 3, 4):
+            raise ValueError(f"global_edge_mask must have 2, 3, or 4 dims, got {global_edge_mask.shape}")
+        if global_node_padding_mask.dim() == 1:
+            padding = global_node_padding_mask.view(1, 1, g).expand(b, n, g)
+        elif global_node_padding_mask.dim() == 2:
+            padding = global_node_padding_mask.view(b, 1, g).expand(b, n, g)
+        elif global_node_padding_mask.dim() == 3:
+            padding = global_node_padding_mask
+        else:
+            raise ValueError(f"global_node_padding_mask must have 1, 2, or 3 dims, got {global_node_padding_mask.shape}")
+        # CAtNIPP-style global encoder: dense self-attention over all valid global
+        # nodes. The graph edge mask is kept in the observation interface for
+        # candidate/action construction, but it no longer limits encoder attention.
+        encoder_mask = padding.unsqueeze(2).expand(b, n, g, g).bool()
+        return encoder_mask.reshape(b * n, g, g), padding.bool()
+
+    def _encode_global_with(
+        self,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        initial_embedding: nn.Linear,
+        encoder: Encoder,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        b, n, g, _ = global_node_inputs.shape
+        encoder_mask, padding = self._global_masks(global_edge_mask, global_node_padding_mask, b, n, g)
+        flat_nodes = global_node_inputs.reshape(b * n, g, -1)
+        embedded = initial_embedding(flat_nodes)
+        # Future STAMP-style graph PE path:
+        # embedded = embedded + self.spatio_pos_embedding(spatio_pos_encoding.reshape(b * n, g, -1))
+        encoded = encoder(embedded, encoder_mask)
+        encoded = encoded.masked_fill(padding.reshape(b * n, g, 1), 0.0)
+        valid = (~padding).float().unsqueeze(-1)
+        pooled = (encoded.reshape(b, n, g, -1) * valid).sum(dim=2) / valid.sum(dim=2).clamp(min=1.0)
+        return encoded.reshape(b, n, g, -1), padding, pooled
+
+    def _encode_actor_global(
+        self,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._encode_global_with(
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+            self.actor_initial_embedding,
+            self.actor_encoder,
+        )
+
+    def _encode_critic_global(
+        self,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self._encode_global_with(
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+            self.critic_initial_embedding,
+            self.critic_encoder,
+        )
+
+    @staticmethod
+    def _gather_current(encoded: torch.Tensor, current_node_indices: torch.Tensor) -> torch.Tensor:
+        b, n, _, e = encoded.shape
+        idx = current_node_indices.long().clamp(min=0).view(b, n, 1, 1).expand(-1, -1, 1, e)
+        return torch.gather(encoded, dim=2, index=idx).squeeze(2)
+
+    @staticmethod
+    def _gather_candidates(encoded: torch.Tensor, candidate_node_indices: torch.Tensor) -> torch.Tensor:
+        b, n, _, e = encoded.shape
+        m = candidate_node_indices.shape[-1]
+        idx = candidate_node_indices.long().clamp(min=0).view(b, n, m, 1).expand(-1, -1, -1, e)
+        return torch.gather(encoded, dim=2, index=idx)
+
+    def _critic_value(
+        self,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        current_node_indices: torch.Tensor,
+        uav_state: torch.Tensor,
+    ) -> torch.Tensor:
+        critic_encoded, _, critic_pooled = self._encode_critic_global(
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+        )
+        critic_current = self._gather_current(critic_encoded, current_node_indices)
+        critic_uav = self.critic_uav_encoder(uav_state.float())
+        critic_state = self.critic_state_embedding(torch.cat([critic_current + critic_pooled, critic_uav], dim=-1))
+        team_context = critic_state.mean(dim=1)
+        return self.value_head(team_context).squeeze(-1).unsqueeze(1).expand(-1, uav_state.shape[1])
 
     def termination_logits(
         self,
-        node_inputs: torch.Tensor,
-        node_padding_mask: torch.Tensor,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        current_node_indices: torch.Tensor,
+        candidate_node_indices: torch.Tensor,
+        candidate_padding_mask: torch.Tensor,
         action_mask: torch.Tensor,
         uav_state: torch.Tensor,
         prev_option: torch.Tensor,
-        team_summary: torch.Tensor,
     ) -> torch.Tensor:
-        encoded, _, _ = self._encode(node_inputs, node_padding_mask, action_mask)
-        base, _ = self._base_state(encoded, node_padding_mask, uav_state, team_summary)
-        prev_feature = base + self.option_embedding_for_termination(prev_option.long())
-        return self.termination_head(prev_feature).squeeze(-1)
+        del candidate_node_indices, candidate_padding_mask, action_mask, uav_state
+        encoded, _, _ = self._encode_actor_global(global_node_inputs, global_edge_mask, global_node_padding_mask)
+        current_feature = self._gather_current(encoded, current_node_indices)
+        return self.termination_head(current_feature + self.option_embedding_for_termination(prev_option.long())).squeeze(-1)
 
     def forward(
         self,
-        node_inputs: torch.Tensor,
-        node_padding_mask: torch.Tensor,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        current_node_indices: torch.Tensor,
+        candidate_node_indices: torch.Tensor,
+        candidate_padding_mask: torch.Tensor,
         action_mask: torch.Tensor,
         uav_state: torch.Tensor,
         prev_option: torch.Tensor,
-        team_summary: torch.Tensor,
         current_option: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        b, n, m, _ = node_inputs.shape
-        encoded, _, pointer_mask = self._encode(node_inputs, node_padding_mask, action_mask)
-        base, pooled = self._base_state(encoded, node_padding_mask, uav_state, team_summary)
+        b, n, g, _ = global_node_inputs.shape
+        m = candidate_node_indices.shape[-1]
+        encoded, _, _ = self._encode_actor_global(global_node_inputs, global_edge_mask, global_node_padding_mask)
+        current_feature = self._gather_current(encoded, current_node_indices)
+        candidate_feature = self._gather_candidates(encoded, candidate_node_indices)
         if self.cfg.disable_options:
             current_option = torch.zeros_like(prev_option.long())
             termination_logits = torch.full_like(prev_option.float(), -20.0)
         else:
-            prev_feature = base + self.option_embedding_for_termination(prev_option.long())
+            prev_feature = current_feature + self.option_embedding_for_termination(prev_option.long())
             termination_logits = self.termination_head(prev_feature).squeeze(-1)
             if current_option is None:
                 current_option = prev_option.long()
-        query = base + self.option_embedding_for_policy(current_option.long())
+        query = current_feature
+        if not self.cfg.disable_options:
+            query = query + self.option_embedding_for_policy(current_option.long())
         flat_query = query.reshape(b * n, 1, -1)
-        flat_encoded = encoded.reshape(b * n, m, -1)
-        enhanced_query = self.decoder(flat_query, flat_encoded, node_padding_mask.reshape(b * n, 1, m).bool())
-        state = self.current_embedding(torch.cat([enhanced_query, flat_query], dim=-1))
-        logp = self.pointer(state, flat_encoded, pointer_mask).squeeze(1)
-        waypoint_logits = masked_logits(logp.reshape(b, n, m), action_mask | node_padding_mask)
-        flat_state = state.reshape(b, n, -1)
-        values = self.value_head(torch.cat([flat_state, pooled], dim=-1)).squeeze(-1)
+        flat_candidates = candidate_feature.reshape(b * n, m, -1)
+        pointer_mask = (action_mask | candidate_padding_mask | (candidate_node_indices < 0)).reshape(b * n, 1, m).bool()
+        enhanced_query = self.actor_decoder(flat_query, flat_candidates, pointer_mask)
+        logp = self.pointer(enhanced_query, flat_candidates, pointer_mask).squeeze(1)
+        waypoint_logits = masked_logits(logp.reshape(b, n, m), action_mask | candidate_padding_mask | (candidate_node_indices < 0))
+        values = self._critic_value(
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+            current_node_indices,
+            uav_state,
+        )
         return termination_logits, waypoint_logits, values
 
     @torch.no_grad()
     def act(
         self,
-        node_inputs: torch.Tensor,
-        node_padding_mask: torch.Tensor,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        current_node_indices: torch.Tensor,
+        candidate_node_indices: torch.Tensor,
+        candidate_padding_mask: torch.Tensor,
         action_mask: torch.Tensor,
         uav_state: torch.Tensor,
         prev_option: torch.Tensor,
-        team_summary: torch.Tensor,
         greedy: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         action, option, terminate, _, _, _ = self.act_with_info(
-            node_inputs, node_padding_mask, action_mask, uav_state, prev_option, team_summary, greedy=greedy
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+            current_node_indices,
+            candidate_node_indices,
+            candidate_padding_mask,
+            action_mask,
+            uav_state,
+            prev_option,
+            greedy=greedy,
         )
         return action, option, terminate
 
     def evaluate_actions(
         self,
-        node_inputs: torch.Tensor,
-        node_padding_mask: torch.Tensor,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        current_node_indices: torch.Tensor,
+        candidate_node_indices: torch.Tensor,
+        candidate_padding_mask: torch.Tensor,
         action_mask: torch.Tensor,
         uav_state: torch.Tensor,
         prev_option: torch.Tensor,
-        team_summary: torch.Tensor,
         actions: torch.Tensor,
         terminations: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -266,12 +367,15 @@ class OptionActor(nn.Module):
             terminations = torch.zeros_like(terminations)
         current_option = torch.where(terminations.bool(), 1 - prev_option.long(), prev_option.long())
         termination_logits, logits, values = self.forward(
-            node_inputs,
-            node_padding_mask,
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+            current_node_indices,
+            candidate_node_indices,
+            candidate_padding_mask,
             action_mask,
             uav_state,
             prev_option,
-            team_summary,
             current_option=current_option,
         )
         action_dist = torch.distributions.Categorical(logits=logits)
@@ -291,31 +395,48 @@ class OptionActor(nn.Module):
     @torch.no_grad()
     def act_with_info(
         self,
-        node_inputs: torch.Tensor,
-        node_padding_mask: torch.Tensor,
+        global_node_inputs: torch.Tensor,
+        global_edge_mask: torch.Tensor,
+        global_node_padding_mask: torch.Tensor,
+        current_node_indices: torch.Tensor,
+        candidate_node_indices: torch.Tensor,
+        candidate_padding_mask: torch.Tensor,
         action_mask: torch.Tensor,
         uav_state: torch.Tensor,
         prev_option: torch.Tensor,
-        team_summary: torch.Tensor,
         greedy: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        termination_logits = self.termination_logits(node_inputs, node_padding_mask, action_mask, uav_state, prev_option, team_summary)
         if self.cfg.disable_options or self.cfg.disable_termination:
-            beta = torch.zeros_like(termination_logits)
+            termination_logits = torch.zeros_like(prev_option.float())
+            beta = torch.zeros_like(prev_option.float())
             terminate = torch.zeros_like(prev_option, dtype=torch.bool)
         else:
+            termination_logits = self.termination_logits(
+                global_node_inputs,
+                global_edge_mask,
+                global_node_padding_mask,
+                current_node_indices,
+                candidate_node_indices,
+                candidate_padding_mask,
+                action_mask,
+                uav_state,
+                prev_option,
+            )
             beta = torch.sigmoid(termination_logits)
             terminate = beta > 0.5 if greedy else torch.distributions.Bernoulli(probs=beta).sample().bool()
         option = torch.where(terminate, 1 - prev_option.long(), prev_option.long())
         if self.cfg.disable_options:
             option = torch.zeros_like(prev_option.long())
         _, logits, values = self.forward(
-            node_inputs,
-            node_padding_mask,
+            global_node_inputs,
+            global_edge_mask,
+            global_node_padding_mask,
+            current_node_indices,
+            candidate_node_indices,
+            candidate_padding_mask,
             action_mask,
             uav_state,
             prev_option,
-            team_summary,
             current_option=option,
         )
         action_dist = torch.distributions.Categorical(logits=logits)

@@ -19,7 +19,7 @@ import numpy as np
 from baselines import HeuristicBaseline, RandomBaseline
 from config import Config
 from environment import CMUOMMTEnv
-from nodes import NodeBuilder
+from nodes import NODE_INPUT_INDEX, NodeBuilder
 from pseudo_tracks import PseudoTrackMemory
 from search_belief import SearchBelief
 from target_belief import TargetBelief
@@ -56,10 +56,9 @@ def entity_legend_handles() -> list[Line2D]:
 
 def signal_legend_handles() -> list[Line2D]:
     return [
-        Line2D([0], [0], marker="P", color=TARGET_COLOR, markeredgecolor="black", linestyle="None", markersize=8, label="target hard flag"),
-        Line2D([0], [0], marker="s", color=SEARCH_COLOR, markeredgecolor="black", linestyle="None", markersize=7, label="search flag"),
-        Line2D([0], [0], marker="D", color=MAINT_COLOR, markeredgecolor="black", linestyle="None", markersize=7, label="maintenance flag"),
-        Line2D([0], [0], marker="o", color="black", markerfacecolor="none", linestyle="None", markersize=9, label="goal signal"),
+        Line2D([0], [0], marker="P", color=TARGET_COLOR, markeredgecolor="black", linestyle="None", markersize=8, label="PHD target peak"),
+        Line2D([0], [0], marker="s", color=SEARCH_COLOR, markeredgecolor="black", linestyle="None", markersize=7, label="search peak"),
+        Line2D([0], [0], marker="D", color=MAINT_COLOR, markeredgecolor="black", linestyle="None", markersize=7, label="maintenance peak"),
         Line2D([0], [0], marker="*", color="#333333", markeredgecolor="black", linestyle="None", markersize=10, label="selected action"),
         Line2D([0], [0], marker=".", color="#555555", linestyle="None", markersize=8, label="valid action candidate"),
     ]
@@ -81,18 +80,20 @@ def candidate_stats(batch, actions: np.ndarray) -> dict:
     valid = ~batch.node_padding_mask & ~batch.action_mask
     features = batch.node_inputs
     selected = features[np.arange(features.shape[0]), actions]
+    distance_idx = NODE_INPUT_INDEX["candidate_distance_norm"]
+    age_idx = NODE_INPUT_INDEX["coverage_age_value"]
+    overlap_idx = NODE_INPUT_INDEX["overlap"]
+    valid_distance = features[:, :, distance_idx][valid]
+    valid_age = features[:, :, age_idx][valid]
+    valid_overlap = features[:, :, overlap_idx][valid]
     return {
         "valid_candidates_mean": float(np.mean(np.sum(valid, axis=1))),
-        "target_value_nodes": float(np.sum(valid & (features[:, :, 5] >= 0.05))),
-        "target_nodes": float(np.sum(valid & (features[:, :, 12] > 0.5))),
-        "search_nodes": float(np.sum(valid & (features[:, :, 13] > 0.5))),
-        "maintenance_nodes": float(np.sum(valid & (features[:, :, 14] > 0.5))),
-        "goal_nodes": float(np.sum(valid & (features[:, :, 15] > 0.5))),
-        "selected_target_value_mean": float(np.mean(selected[:, 5])),
-        "selected_target_rate": float(np.mean(selected[:, 12] > 0.5)),
-        "selected_search_rate": float(np.mean(selected[:, 13] > 0.5)),
-        "selected_maintenance_rate": float(np.mean(selected[:, 14] > 0.5)),
-        "selected_goal_rate": float(np.mean(selected[:, 15] > 0.5)),
+        "candidate_distance_norm_mean": float(np.mean(valid_distance)) if len(valid_distance) else 0.0,
+        "candidate_coverage_age_value_mean": float(np.mean(valid_age)) if len(valid_age) else 0.0,
+        "candidate_overlap_mean": float(np.mean(valid_overlap)) if len(valid_overlap) else 0.0,
+        "selected_candidate_distance_norm": float(np.mean(selected[:, distance_idx])) if len(selected) else 0.0,
+        "selected_coverage_age_value": float(np.mean(selected[:, age_idx])) if len(selected) else 0.0,
+        "selected_overlap": float(np.mean(selected[:, overlap_idx])) if len(selected) else 0.0,
     }
 
 
@@ -187,34 +188,28 @@ def draw_graph_signals(ax, cfg: Config, env: CMUOMMTEnv, builder: NodeBuilder) -
     legend = [
         Line2D([0], [0], marker="o", color="#9e9e9e", linestyle="None", markersize=6, label="global graph node"),
     ]
-    ax.legend(handles=legend + signal_legend_handles()[:4] + entity_legend_handles()[:3], loc="upper right", fontsize=5.8, framealpha=0.75)
+    ax.legend(handles=legend + signal_legend_handles()[:3] + entity_legend_handles()[:3], loc="upper right", fontsize=5.8, framealpha=0.75)
 
 
 def draw_candidates(ax, cfg: Config, env: CMUOMMTEnv, batch, actions: np.ndarray) -> None:
     draw_entities(ax, cfg, env, measurements=None)
+    age_idx = NODE_INPUT_INDEX["coverage_age_value"]
+    overlap_idx = NODE_INPUT_INDEX["overlap"]
     for i in range(cfg.n_uavs):
         valid = ~batch.node_padding_mask[i] & ~batch.action_mask[i]
         points = batch.waypoints[i, valid]
         feats = batch.node_inputs[i, valid]
         color = UAV_COLORS[i % len(UAV_COLORS)]
-        ax.scatter(points[:, 0], points[:, 1], marker=".", color=color, s=28, alpha=0.85)
+        sizes = 28 + 70 * np.clip(feats[:, age_idx], 0.0, 1.0) if len(feats) else 28
+        ax.scatter(points[:, 0], points[:, 1], marker=".", color=color, s=sizes, alpha=0.82)
         for point, feat in zip(points, feats):
-            if feat[12] > 0.5:
-                marker, c = "P", TARGET_COLOR
-            elif feat[14] > 0.5:
-                marker, c = "D", MAINT_COLOR
-            elif feat[13] > 0.5:
-                marker, c = "s", SEARCH_COLOR
-            else:
-                continue
-            if feat[15] > 0.5:
-                ax.scatter(point[0], point[1], marker="o", facecolors="none", edgecolors="black", linewidths=1.1, s=76)
-            ax.scatter(point[0], point[1], marker=marker, color=c, edgecolor="black", s=58)
+            if feat[overlap_idx] >= 0.25:
+                ax.scatter(point[0], point[1], marker="o", facecolor="none", edgecolor="#111111", s=72, linewidth=0.8)
         chosen = batch.waypoints[i, actions[i]]
         ax.plot([env.uav_positions[i, 0], chosen[0]], [env.uav_positions[i, 1], chosen[1]], color=color, linewidth=2.2)
         ax.scatter(chosen[0], chosen[1], marker="*", color=color, edgecolor="black", s=110)
-    setup_map_axis(ax, cfg, "Actor action candidates: k-nearest graph nodes")
-    ax.legend(handles=entity_legend_handles()[:3] + signal_legend_handles(), loc="upper right", fontsize=6, framealpha=0.75)
+    setup_map_axis(ax, cfg, "Actor candidates: size=coverage age, ring=overlap")
+    ax.legend(handles=entity_legend_handles()[:3] + signal_legend_handles()[3:], loc="upper right", fontsize=6, framealpha=0.75)
 
 
 def draw_frame(
@@ -288,7 +283,7 @@ def draw_discrete_graph_overview(out_path: Path, cfg: Config, env: CMUOMMTEnv, b
         Line2D([0], [0], marker="o", color="#9e9e9e", linestyle="None", markersize=6, label="global graph node"),
         Line2D([0], [0], marker=".", color="#555555", linestyle="None", markersize=8, label="local action neighborhood"),
     ]
-    ax.legend(handles=graph_handles + signal_legend_handles()[:4] + entity_legend_handles()[:3], loc="upper right", fontsize=6.4, framealpha=0.75)
+    ax.legend(handles=graph_handles + signal_legend_handles()[:3] + entity_legend_handles()[:3], loc="upper right", fontsize=6.4, framealpha=0.75)
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -296,48 +291,41 @@ def draw_discrete_graph_overview(out_path: Path, cfg: Config, env: CMUOMMTEnv, b
 
 def draw_signal_counts(out_path: Path, rows: list[dict]) -> None:
     steps = np.asarray([row["step"] for row in rows], dtype=np.float32)
+    def series(key: str) -> list[float]:
+        return [float(row.get(key, 0.0)) for row in rows]
+
     fig, axes = plt.subplots(4, 1, figsize=(11, 10), dpi=140, sharex=True)
 
     ax = axes[0]
-    ax.plot(steps, [row["phd_peak_count"] for row in rows], color=TARGET_COLOR, label="PHD target hard flags")
-    ax.plot(steps, [row["graph_search_flag_count"] for row in rows], color=SEARCH_COLOR, label="graph search flags")
-    ax.plot(steps, [row["graph_maintenance_flag_count"] for row in rows], color=MAINT_COLOR, label="graph maintenance flags")
-    ax.set_ylabel("flag count")
-    ax.set_title("Hard signal counts over rollout")
+    ax.plot(steps, series("valid_candidates_mean"), color="#333333", label="valid candidates / UAV")
+    ax.plot(steps, series("phd_peak_count"), color=TARGET_COLOR, label="PHD peak count")
+    ax.set_ylabel("count")
+    ax.set_title("Candidate availability and PHD peaks")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper left")
 
     ax = axes[1]
-    ax.plot(steps, [row["target_value_nodes"] for row in rows], color=TARGET_COLOR, linestyle="--", label="candidate target-value nodes")
-    ax.plot(steps, [row["target_nodes"] for row in rows], color=TARGET_COLOR, label="candidate target hard flags")
-    ax.plot(steps, [row["search_nodes"] for row in rows], color=SEARCH_COLOR, label="candidate search flags")
-    ax.plot(steps, [row["maintenance_nodes"] for row in rows], color=MAINT_COLOR, label="candidate maintenance flags")
-    ax.plot(steps, [row["goal_nodes"] for row in rows], color="#111111", linewidth=1.7, label="candidate goal signals")
-    ax.set_ylabel("candidate count")
-    ax.set_title("Signals inside actor k-nearest candidates")
+    ax.plot(steps, series("candidate_coverage_age_value_mean"), color=SEARCH_COLOR, label="candidate coverage age mean")
+    ax.plot(steps, series("selected_coverage_age_value"), color="#111111", linewidth=1.7, label="selected coverage age")
+    ax.set_ylabel("age value")
+    ax.set_title("Coverage age signal")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper left")
 
     ax = axes[2]
-    ax.plot(steps, [row["phd_total_weight"] for row in rows], color="#333333", label="PHD total weight")
-    ax.plot(steps, [row["phd_max_cell_weight"] for row in rows], color=TARGET_COLOR, label="PHD raw max cell")
-    ax.plot(steps, [row["graph_target_value_max"] for row in rows], color=TARGET_COLOR, linestyle="--", label="graph target max")
-    ax.plot(steps, [row["graph_search_value_max"] for row in rows], color=SEARCH_COLOR, label="graph search max")
-    ax.plot(steps, [row["graph_maintenance_value_max"] for row in rows], color=MAINT_COLOR, label="graph maintenance max")
-    ax.set_ylabel("value")
-    ax.set_title("Continuous belief/signal magnitudes")
+    ax.plot(steps, series("candidate_overlap_mean"), color="#777777", label="candidate overlap mean")
+    ax.plot(steps, series("selected_overlap"), color="#111111", linewidth=1.7, label="selected overlap")
+    ax.set_ylabel("overlap")
+    ax.set_title("Overlap signal")
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, loc="upper left", ncol=2)
+    ax.legend(fontsize=8, loc="upper left")
 
     ax = axes[3]
-    ax.plot(steps, [row["selected_target_value_mean"] for row in rows], color=TARGET_COLOR, linestyle="--", label="selected target value mean")
-    ax.plot(steps, [row["selected_target_rate"] for row in rows], color=TARGET_COLOR, label="selected target flag rate")
-    ax.plot(steps, [row["selected_search_rate"] for row in rows], color=SEARCH_COLOR, label="selected search flag rate")
-    ax.plot(steps, [row["selected_maintenance_rate"] for row in rows], color=MAINT_COLOR, label="selected maintenance flag rate")
-    ax.plot(steps, [row["selected_goal_rate"] for row in rows], color="#111111", linewidth=1.7, label="selected goal signal rate")
+    ax.plot(steps, series("candidate_distance_norm_mean"), color="#777777", label="candidate distance mean")
+    ax.plot(steps, series("selected_candidate_distance_norm"), color="#111111", linewidth=1.7, label="selected distance")
     ax.set_xlabel("step")
-    ax.set_ylabel("selected rate/value")
-    ax.set_title("Selected action signal content")
+    ax.set_ylabel("distance / map")
+    ax.set_title("Movement distance signal")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="upper left")
 
@@ -364,14 +352,17 @@ def run_visualization(cfg: Config, args) -> dict:
     out = Path(args.out_dir)
     frames_dir = out / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
+    builder = NodeBuilder(cfg)
+    builder.reset(seed=args.seed)
+    start_rng = np.random.default_rng(args.seed + 909)
+    uav_positions = builder.graph.sample_start_positions(cfg.n_uavs, start_rng)
+    builder.reset(seed=args.seed, start_positions=uav_positions)
     env = CMUOMMTEnv(cfg)
-    env.reset(seed=args.seed, n_targets=args.n_targets)
+    env.reset(seed=args.seed, n_targets=args.n_targets, uav_positions=uav_positions)
     target = TargetBelief(cfg, eval_mode=True)
     target.reset(seed=args.seed + 101)
     search = SearchBelief(cfg)
     tracks = PseudoTrackMemory(cfg)
-    builder = NodeBuilder(cfg)
-    builder.reset()
     if args.policy == "random":
         policy = RandomBaseline()
     else:
