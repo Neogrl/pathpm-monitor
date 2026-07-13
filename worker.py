@@ -200,14 +200,6 @@ class RolloutWorker:
             out[key] = tensor
         return out
 
-    @torch.no_grad()
-    def _values_from_obs(self, obs: dict) -> np.ndarray:
-        if self.actor is None:
-            return np.zeros(self.cfg.n_uavs, dtype=np.float32)
-        torch_obs = self._to_torch(obs, batch_dim=True)
-        _, _, values = self.actor.forward(**torch_obs)
-        return values[0].detach().cpu().numpy().astype(np.float32)
-
     def _node_diagnostics(self, obs: dict, actions: np.ndarray) -> dict[str, float]:
         valid = ~obs["action_mask"] & ~obs["node_padding_mask"]
         features = obs["node_inputs"]
@@ -252,6 +244,7 @@ class RolloutWorker:
         env, target, search, tracks, prev_option = self.reset_stack(seed, n_targets=n_targets, eval_mode=eval_mode)
         rewards: list[float] = []
         overlaps: list[float] = []
+        pending_transition: Optional[dict] = None
         diagnostics: dict[str, list[float]] = {
             "valid_candidates_mean": [],
             "candidate_distance_norm_mean": [],
@@ -284,6 +277,11 @@ class RolloutWorker:
         for _ in range(self.cfg.episode_steps):
             target.predict()
             obs, actions, options, terminations, selected_waypoints, log_probs, values, betas = self._joint_obs_and_actions(env, target, search, tracks, prev_option, greedy)
+            if replay is not None and pending_transition is not None:
+                # This policy call already produced V(s[t+1]), so reuse it instead of running a second full forward pass.
+                pending_transition["next_values"] = values.astype(np.float32).copy()
+                replay.add(pending_transition)
+                pending_transition = None
             node_diag = self._node_diagnostics(obs, actions)
             for key, value in node_diag.items():
                 diagnostics.setdefault(key, []).append(value)
@@ -328,30 +326,8 @@ class RolloutWorker:
             diagnostics["reward_switch_metric"].append(terms["switch"])
             rewards.append(reward)
             overlaps.append(terms["overlap"])
-            next_batch = self.node_builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
-            next_global_batch = self.node_builder.global_batch_from_candidates(
-                env.uav_positions,
-                target,
-                search,
-                tracks,
-                next_batch.candidate_node_indices,
-                next_batch.node_padding_mask,
-                next_batch.action_mask,
-                step=env.step_count,
-            )
-            next_obs = self._obs_dict_from_arrays(
-                next_batch.node_inputs,
-                next_batch.node_padding_mask,
-                next_batch.action_mask,
-                env,
-                target,
-                search,
-                options,
-                global_batch=next_global_batch,
-            )
             if replay is not None:
-                next_values = self._values_from_obs(next_obs)
-                transition = {
+                pending_transition = {
                     "node_inputs": obs["node_inputs"],
                     "node_padding_mask": obs["node_padding_mask"],
                     "action_mask": obs["action_mask"],
@@ -370,21 +346,15 @@ class RolloutWorker:
                     "terminations": terminations.astype(np.float32),
                     "log_probs": log_probs.astype(np.float32),
                     "values": values.astype(np.float32),
-                    "next_values": next_values.astype(np.float32),
                     "reward": np.asarray(reward, dtype=np.float32),
                     "done": np.asarray(float(env.done()), dtype=np.float32),
-                    "next_node_inputs": next_obs["node_inputs"],
-                    "next_node_padding_mask": next_obs["node_padding_mask"],
-                    "next_action_mask": next_obs["action_mask"],
-                    "next_uav_state": next_obs["uav_state"],
-                    "next_prev_option": next_obs["prev_option"],
-                    "next_global_phd": next_obs["global_phd"],
-                    "next_global_search": next_obs["global_search"],
                 }
-                replay.add(transition)
             prev_option = options.copy()
             if env.done():
                 break
+        if replay is not None and pending_transition is not None:
+            pending_transition["next_values"] = np.zeros_like(pending_transition["values"], dtype=np.float32)
+            replay.add(pending_transition)
         metrics = final_metrics(
             self.cfg,
             env.memory,

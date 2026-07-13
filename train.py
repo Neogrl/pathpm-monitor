@@ -1,7 +1,9 @@
 import argparse
 import csv
+import json
 import os
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
@@ -80,6 +82,8 @@ class TrainingLogger:
 
     @staticmethod
     def _group(key: str) -> str:
+        if key in {"rollout_seconds", "ppo_update_seconds", "collection_seconds", "rollout_steps_per_second"}:
+            return "timing"
         if key.startswith("val_"):
             return "val"
         if key.startswith("reward_"):
@@ -200,6 +204,21 @@ def write_table(path: Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def read_table(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
 
 
 def format_progress(row: dict) -> str:
@@ -428,33 +447,75 @@ def train(
         device = torch.device(cfg.device)
         trainer = Trainer(cfg, device)
         latest_path = out / "latest.pt"
-        if resume and latest_path.exists():
-            print(f"[train] resume checkpoint={latest_path}", flush=True)
-            trainer.load(latest_path)
-
         rows: list[dict] = []
         episode_seed = seed
         completed_episodes = 0
-        next_checkpoint_episode = max(cfg.checkpoint_episode_interval, 1)
+        start_update = 0
         best_value = -float("inf")
-        best_summary = {}
+        best_summary: dict = {}
+        if resume and latest_path.exists():
+            print(f"[train] resume checkpoint={latest_path}", flush=True)
+            trainer.load(latest_path)
+            rows = read_table(out / "training_metrics.csv")
+            run_state = read_json(out / "run_state.json")
+            if int(run_state.get("trainer_update_count", -1)) == trainer.update_count:
+                start_update = int(run_state.get("completed_collections", 0))
+                completed_episodes = int(run_state.get("completed_episodes", 0))
+                episode_seed = int(run_state.get("episode_seed", seed + completed_episodes))
+            else:
+                rollout_size = max(cfg.episodes_per_collection, 1) * max(cfg.episode_steps, 1)
+                if cfg.ppo_num_minibatches > 0:
+                    minibatches_per_epoch = min(cfg.ppo_num_minibatches, rollout_size)
+                else:
+                    minibatch_size = max(min(cfg.ppo_minibatch_size, rollout_size), 1)
+                    minibatches_per_epoch = (rollout_size + minibatch_size - 1) // minibatch_size
+                optimizer_steps_per_collection = max(cfg.ppo_update_epochs, 1) * minibatches_per_epoch
+                if trainer.update_count % optimizer_steps_per_collection != 0:
+                    raise RuntimeError(
+                        "Cannot infer resume collection from checkpoint: "
+                        f"update_count={trainer.update_count} optimizer_steps_per_collection={optimizer_steps_per_collection}"
+                    )
+                start_update = trainer.update_count // optimizer_steps_per_collection
+                completed_episodes = start_update * max(cfg.episodes_per_collection, 1)
+                episode_seed = seed + completed_episodes
+            best_summary = read_json(out / "best_summary.json")
+            best_metric_name = validation_metric if validation_metric in best_summary else (best_metric or cfg.best_metric)
+            best_candidate = best_summary.get(best_metric_name)
+            if isinstance(best_candidate, (int, float)) and not np.isnan(float(best_candidate)):
+                best_value = float(best_candidate)
+            print(
+                f"[train] resume state start_update={start_update} completed_episodes={completed_episodes} "
+                f"next_seed={episode_seed} history_rows={len(rows)} best_value={best_value:.4f}",
+                flush=True,
+            )
+
+        checkpoint_interval = max(cfg.checkpoint_episode_interval, 1)
+        next_checkpoint_episode = ((completed_episodes // checkpoint_interval) + 1) * checkpoint_interval
         worker_count = min(max(cfg.rollout_workers, 1), max(cfg.episodes_per_collection, 1))
         rollout_pool = create_rollout_pool(cfg, worker_count)
         try:
-            for update in range(updates):
+            for update in range(start_update, updates):
                 update_label = f"update {update + 1}/{updates}"
                 print(f"[train] {update_label}: collect rollout", flush=True)
+                rollout_started = time.perf_counter()
                 rollout, episode_rows, episode_seed = collect_rollouts(cfg, trainer, episode_seed, rollout_pool, update_label)
+                rollout_seconds = time.perf_counter() - rollout_started
                 completed_episodes += len(episode_rows)
                 episode_metrics = aggregate_dicts(episode_rows)
                 print(f"[train] update {update + 1}/{updates}: ppo update rollout_size={len(rollout)}", flush=True)
+                ppo_started = time.perf_counter()
                 train_stats = trainer.update(rollout).__dict__
+                ppo_update_seconds = time.perf_counter() - ppo_started
 
                 row = {
                     "update": trainer.update_count,
                     "collection_index": update,
                     "episode_count": completed_episodes,
                     "rollout_size": len(rollout),
+                    "rollout_seconds": rollout_seconds,
+                    "ppo_update_seconds": ppo_update_seconds,
+                    "collection_seconds": rollout_seconds + ppo_update_seconds,
+                    "rollout_steps_per_second": len(rollout) / max(rollout_seconds, 1e-8),
                     **train_stats,
                     **episode_metrics,
                 }
@@ -483,13 +544,31 @@ def train(
 
                 rows.append(row)
                 logger.log(row, completed_episodes)
+                print(
+                    f"[train] update {update + 1}/{updates}: timing "
+                    f"rollout_seconds={rollout_seconds:.2f} ppo_update_seconds={ppo_update_seconds:.2f} "
+                    f"rollout_steps_per_second={row['rollout_steps_per_second']:.2f}",
+                    flush=True,
+                )
                 print(f"[train] update {update + 1}/{updates}: done {format_progress(row)}", flush=True)
                 trainer.save(latest_path)
+                write_json(
+                    out / "run_state.json",
+                    {
+                        "completed_collections": update + 1,
+                        "completed_episodes": completed_episodes,
+                        "episode_seed": episode_seed,
+                        "trainer_update_count": trainer.update_count,
+                        "target_updates": updates,
+                        "episode_steps": cfg.episode_steps,
+                        "episodes_per_collection": cfg.episodes_per_collection,
+                    },
+                )
                 print(f"[train] update {update + 1}/{updates}: saved latest update_count={trainer.update_count}", flush=True)
                 checkpoint_due = False
                 while completed_episodes >= next_checkpoint_episode:
                     checkpoint_due = True
-                    next_checkpoint_episode += max(cfg.checkpoint_episode_interval, 1)
+                    next_checkpoint_episode += checkpoint_interval
                 if checkpoint_due or update == updates - 1:
                     checkpoint_path = out / f"checkpoint_episode_{completed_episodes}_update_{trainer.update_count}.pt"
                     trainer.save(checkpoint_path)
