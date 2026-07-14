@@ -9,9 +9,9 @@ class Config:
     dt: float = 1.0
     episode_steps: int = 256
     n_uavs: int = 5
-    n_targets_true: int = 5
-    n_targets_min: int = 3
-    n_targets_max: int = 7
+    n_targets_true: int = 7
+    n_targets_min: int = 6
+    n_targets_max: int = 8
     max_true_targets: int = 8
     uav_speed: float = 5.5
     fov_radius: float = 12.0
@@ -32,7 +32,7 @@ class Config:
     search_decay_covered: float = 0.38
     search_min: float = 0.04
     search_age_scale: float = 25.0
-    phd_prior_count: float = 4.0
+    phd_prior_count: float = 7.0
     n_particles_train: int = 1200
     n_particles_eval: int = 2500
     transition_noise: float = 0.14
@@ -71,7 +71,7 @@ class Config:
     hidden_dim: int = 128
     embed_dim: int = 128
     graph_laplacian_pe_dim: int = 16
-    node_input_dim: int = 5
+    node_input_dim: int = 6
     uav_state_dim: int = 2
     k_neighbors: int = 12
     gamma: float = 0.99
@@ -114,10 +114,12 @@ class Config:
     reward_observe_weight: float = 0.0
     reward_discover_weight: float = 0.0
     reward_continuity_weight: float = 0.0
-    reward_search_weight: float = 1.0
-    reward_overlap_weight: float = -0.2
-    reward_cost_weight: float = -0.02
+    reward_search_weight: float = 0.0
+    reward_overlap_weight: float = 0.0
+    reward_cost_weight: float = 0.0
     reward_miss_weight: float = 0.0
+    reward_phd_position_weight: float = 0.1
+    reward_phd_number_weight: float = 1.0
     ospa_cutoff: float = 25.0
     ospa_order: int = 1
     output_dir: str = "training_output"

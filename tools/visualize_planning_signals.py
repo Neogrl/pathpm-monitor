@@ -83,9 +83,11 @@ def candidate_stats(batch, actions: np.ndarray) -> dict:
     distance_idx = NODE_INPUT_INDEX["candidate_distance_norm"]
     age_idx = NODE_INPUT_INDEX["coverage_age_value"]
     overlap_idx = NODE_INPUT_INDEX["overlap"]
+    target_idx = NODE_INPUT_INDEX["target_belief_value"]
     valid_distance = features[:, :, distance_idx][valid]
     valid_age = features[:, :, age_idx][valid]
     valid_overlap = features[:, :, overlap_idx][valid]
+    valid_target = features[:, :, target_idx][valid]
     return {
         "valid_candidates_mean": float(np.mean(np.sum(valid, axis=1))),
         "candidate_distance_norm_mean": float(np.mean(valid_distance)) if len(valid_distance) else 0.0,
@@ -94,6 +96,8 @@ def candidate_stats(batch, actions: np.ndarray) -> dict:
         "selected_candidate_distance_norm": float(np.mean(selected[:, distance_idx])) if len(selected) else 0.0,
         "selected_coverage_age_value": float(np.mean(selected[:, age_idx])) if len(selected) else 0.0,
         "selected_overlap": float(np.mean(selected[:, overlap_idx])) if len(selected) else 0.0,
+        "candidate_target_belief_value_mean": float(np.mean(valid_target)) if len(valid_target) else 0.0,
+        "selected_target_belief_value": float(np.mean(selected[:, target_idx])) if len(selected) else 0.0,
     }
 
 

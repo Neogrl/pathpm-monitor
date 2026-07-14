@@ -94,7 +94,20 @@ class TrainingLogger:
             return "options"
         if key in {"mean_reward", "episode_reward", "return_mean", "advantage_mean", "reward_mean"}:
             return "returns"
-        if key in {"discovery_rate", "observation_rate", "continuity", "miss_violation_rate", "OSPA", "cardinality_error"}:
+        if key in {
+            "discovery_rate",
+            "observation_rate",
+            "continuity",
+            "miss_violation_rate",
+            "OSPA",
+            "cardinality_error",
+            "phd_position_error",
+            "phd_number_error",
+            "phd_total_weight",
+            "phd_peak_count",
+            "final_phd_position_error",
+            "final_phd_number_error",
+        }:
             return "task"
         return "metrics"
 
@@ -427,8 +440,9 @@ def train(
             f"ppo_num_minibatches={cfg.ppo_num_minibatches} ppo_minibatch_size={cfg.ppo_minibatch_size} "
             f"use_clipped_value_loss={cfg.use_clipped_value_loss} use_huber_loss={cfg.use_huber_loss} "
             f"huber_delta={cfg.huber_delta} actor_lr={cfg.actor_lr} critic_lr={cfg.critic_lr} "
-            f"adam_eps={cfg.adam_eps} reward_overlap_weight={cfg.reward_overlap_weight} "
-            f"reward_cost_weight={cfg.reward_cost_weight} "
+            f"adam_eps={cfg.adam_eps} reward_phd_position_weight={cfg.reward_phd_position_weight} "
+            f"reward_phd_number_weight={cfg.reward_phd_number_weight} "
+            f"reward_overlap_weight={cfg.reward_overlap_weight} reward_cost_weight={cfg.reward_cost_weight} "
             f"graph_type={cfg.graph_type} prm_random_nodes={cfg.prm_random_nodes} "
             f"prm_sampling={cfg.prm_sampling} prm_jitter_ratio={cfg.prm_jitter_ratio} "
             f"prm_boundary_points_per_side={cfg.prm_boundary_points_per_side} prm_edge_radius={cfg.prm_edge_radius} "
@@ -608,6 +622,8 @@ def main() -> None:
     parser.add_argument("--huber-delta", type=float, default=None)
     parser.add_argument("--reward-overlap-weight", type=float, default=None)
     parser.add_argument("--reward-cost-weight", type=float, default=None)
+    parser.add_argument("--reward-phd-position-weight", type=float, default=None)
+    parser.add_argument("--reward-phd-number-weight", type=float, default=None)
     parser.add_argument("--graph-type", type=str, choices=["grid", "prm"], default=None)
     parser.add_argument("--prm-random-nodes", type=int, default=None)
     parser.add_argument("--prm-sampling", type=str, choices=["stratified", "uniform"], default=None)
@@ -677,6 +693,8 @@ def main() -> None:
         "huber_delta": args.huber_delta,
         "reward_overlap_weight": args.reward_overlap_weight,
         "reward_cost_weight": args.reward_cost_weight,
+        "reward_phd_position_weight": args.reward_phd_position_weight,
+        "reward_phd_number_weight": args.reward_phd_number_weight,
         "graph_type": args.graph_type,
         "prm_random_nodes": args.prm_random_nodes,
         "prm_sampling": args.prm_sampling,

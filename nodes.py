@@ -39,6 +39,7 @@ NODE_INPUT_FIELDS = [
     "candidate_distance_norm",
     "coverage_age_value",
     "overlap",
+    "target_belief_value",
 ]
 NODE_INPUT_INDEX = {name: idx for idx, name in enumerate(NODE_INPUT_FIELDS)}
 NODE_INPUT_DIM = len(NODE_INPUT_FIELDS)
@@ -88,7 +89,7 @@ class NodeBuilder:
                 waypoints[i, j] = wp
                 candidate_node_indices[i, j] = graph_idx
                 node_inputs[i, j] = self._features(
-                    pos, wp, search_belief, uav_positions, selected_waypoints
+                    pos, wp, graph_idx, search_belief, uav_positions, selected_waypoints
                 )
                 padding_mask[i, j] = False
                 too_far = self.cfg.graph_type.lower() != "prm" and dist > self.cfg.local_reachable_radius + 1e-6
@@ -99,7 +100,9 @@ class NodeBuilder:
                 wp = self.graph.positions[graph_idx]
                 waypoints[i, 0] = wp
                 candidate_node_indices[i, 0] = graph_idx
-                node_inputs[i, 0] = self._features(pos, wp, search_belief, uav_positions, selected_waypoints)
+                node_inputs[i, 0] = self._features(
+                    pos, wp, graph_idx, search_belief, uav_positions, selected_waypoints
+                )
                 padding_mask[i, 0] = False
                 action_mask[i, 0] = False
                 count = max(count, 1)
@@ -184,6 +187,9 @@ class NodeBuilder:
             age_value = (self.graph.node_cell_fov_mask @ age / denom).astype(np.float32)
             out[:, :, NODE_INPUT_INDEX["coverage_age_value"]] = age_value[None, :]
 
+        if not self.cfg.disable_phd_belief:
+            out[:, :, NODE_INPUT_INDEX["target_belief_value"]] = self.graph.target_value[None, :]
+
         for i, pos in enumerate(uav_positions):
             refs = [p for j, p in enumerate(uav_positions) if j != i and np.linalg.norm(p - pos) > 1e-6]
             if not refs:
@@ -247,6 +253,7 @@ class NodeBuilder:
         self,
         uav_pos: np.ndarray,
         waypoint: np.ndarray,
+        graph_idx: int,
         search_belief: SearchBelief,
         uav_positions: np.ndarray,
         selected_waypoints: list[np.ndarray],
@@ -268,6 +275,7 @@ class NodeBuilder:
                 distance_norm,
                 age_value,
                 overlap,
+                0.0 if self.cfg.disable_phd_belief else float(self.graph.target_value[graph_idx]),
             ],
             dtype=np.float32,
         )

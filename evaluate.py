@@ -78,7 +78,8 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
         previous_coverage_age = search.coverage_age.copy()
         info = env.step(selected_waypoints)
         target.update(info.measurements.points, env.uav_positions)
-        tracks.update(env.step_count, info.measurements.points, [] if cfg.disable_phd_belief else target.peaks())
+        peaks = [] if cfg.disable_phd_belief else target.peaks()
+        tracks.update(env.step_count, info.measurements.points, peaks)
         search.update(env.uav_positions, info.measurements.points)
         terms = reward_terms(
             cfg,
@@ -86,6 +87,8 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
             len(info.detected_ids),
             info.newly_discovered,
             info.continuous_observed,
+            peaks,
+            env.target_states[:, 0:2],
             previous_coverage_age,
             env.uav_positions,
             info.step_distance,

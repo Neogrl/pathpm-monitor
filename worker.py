@@ -207,7 +207,12 @@ class RolloutWorker:
         out = {
             "valid_candidates_mean": float(np.mean(np.sum(valid, axis=1))),
         }
-        for name in ("candidate_distance_norm", "coverage_age_value", "overlap"):
+        for name in (
+            "candidate_distance_norm",
+            "coverage_age_value",
+            "overlap",
+            "target_belief_value",
+        ):
             idx = NODE_INPUT_INDEX[name]
             values = features[:, :, idx][valid]
             mean_key = f"{name}_mean" if name == "candidate_distance_norm" else f"candidate_{name}_mean"
@@ -271,6 +276,10 @@ class RolloutWorker:
             "reward_overlap_metric": [],
             "reward_cost_metric": [],
             "reward_switch_metric": [],
+            "phd_position_error": [],
+            "phd_number_error": [],
+            "phd_total_weight": [],
+            "phd_peak_count": [],
             "same_node_conflict_rate": [],
             "near_overlap_rate": [],
         }
@@ -308,6 +317,8 @@ class RolloutWorker:
                 len(info.detected_ids),
                 info.newly_discovered,
                 info.continuous_observed,
+                peaks,
+                env.target_states[:, 0:2],
                 previous_coverage_age,
                 env.uav_positions,
                 info.step_distance,
@@ -324,6 +335,10 @@ class RolloutWorker:
             diagnostics["reward_overlap_metric"].append(terms["overlap"])
             diagnostics["reward_cost_metric"].append(terms["cost"])
             diagnostics["reward_switch_metric"].append(terms["switch"])
+            diagnostics["phd_position_error"].append(terms["phd_position_error"])
+            diagnostics["phd_number_error"].append(terms["phd_number_error"])
+            diagnostics["phd_total_weight"].append(float(np.sum(target.weights)))
+            diagnostics["phd_peak_count"].append(float(len(peaks)))
             rewards.append(reward)
             overlaps.append(terms["overlap"])
             if replay is not None:
