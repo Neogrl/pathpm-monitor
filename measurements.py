@@ -7,9 +7,30 @@ from config import Config
 
 @dataclass
 class MeasurementBatch:
+    """Measurements from the team-level union-FOV sensor model.
+
+    Each target produces at most one detection per step when it lies inside at
+    least one UAV FOV. Clutter processes remain per-UAV and are superimposed in
+    the returned point set.
+    """
+
     points: np.ndarray
     detected_target_ids: list[int]
     clutter_count: int
+
+
+def _sample_clutter_point(
+    cfg: Config,
+    rng: np.random.Generator,
+    center: np.ndarray,
+) -> np.ndarray:
+    """Sample uniformly from a circular FOV conditioned on lying inside the map."""
+    while True:
+        angle = rng.uniform(0.0, 2.0 * np.pi)
+        radius = cfg.fov_radius * np.sqrt(rng.uniform(0.0, 1.0))
+        point = center + np.asarray([np.cos(angle), np.sin(angle)]) * radius
+        if np.all((point >= 0.0) & (point <= cfg.map_size)):
+            return point
 
 
 def generate_measurements(
@@ -18,6 +39,7 @@ def generate_measurements(
     uav_positions: np.ndarray,
     target_states: np.ndarray,
 ) -> MeasurementBatch:
+    """Generate one fused measurement set for the complete UAV team."""
     points: list[np.ndarray] = []
     detected: list[int] = []
     for tid, state in enumerate(target_states):
@@ -30,16 +52,10 @@ def generate_measurements(
     clutter_count = int(rng.poisson(cfg.clutter_mean * len(uav_positions)))
     if clutter_count:
         owners = rng.integers(0, len(uav_positions), size=clutter_count)
-        angles = rng.uniform(0, 2 * np.pi, size=clutter_count)
-        radii = cfg.fov_radius * np.sqrt(rng.uniform(0, 1, size=clutter_count))
-        clutter = uav_positions[owners] + np.stack([np.cos(angles) * radii, np.sin(angles) * radii], axis=1)
-        clutter = np.clip(clutter, 0.0, cfg.map_size)
-        points.extend(list(clutter))
+        points.extend(_sample_clutter_point(cfg, rng, uav_positions[owner]) for owner in owners)
 
     if points:
         arr = np.asarray(points, dtype=np.float32)
-        arr = np.clip(arr, 0.0, cfg.map_size)
     else:
         arr = np.zeros((0, 2), dtype=np.float32)
     return MeasurementBatch(points=arr, detected_target_ids=detected, clutter_count=clutter_count)
-

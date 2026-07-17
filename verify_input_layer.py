@@ -363,7 +363,7 @@ def draw_environment(ax, cfg: Config, env: CMUOMMTEnv, measurements: np.ndarray,
 
 def draw_phd(ax, cfg: Config, env: CMUOMMTEnv, target: TargetBelief, measurements: np.ndarray) -> None:
     grid = target.grid()
-    vmax = max(float(np.max(grid)), cfg.target_peak_min_weight, 1e-6)
+    vmax = max(float(np.max(grid)), 1e-6)
     im = ax.imshow(grid, origin="lower", extent=[0, cfg.map_size, 0, cfg.map_size], cmap="magma", vmin=0, vmax=vmax)
     peaks = target.peaks()
     if peaks:
@@ -819,7 +819,6 @@ def run_verification(args) -> dict:
     }
 
     for step in range(args.steps):
-        target.predict()
         batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         global_batch = builder.global_batch_from_candidates(
             env.uav_positions,
@@ -861,6 +860,7 @@ def run_verification(args) -> dict:
         actions = policy.select(cfg, batch, rng)
         selected_waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         info = env.step(selected_waypoints)
+        target.predict(info.step_duration)
         target.update(info.measurements.points, env.uav_positions)
         peaks = [] if cfg.disable_phd_belief else target.peaks()
         tracks.update(env.step_count, info.measurements.points, peaks)

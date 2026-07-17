@@ -129,7 +129,7 @@ def draw_phd(ax, cfg: Config, env: CMUOMMTEnv, target: TargetBelief, measurement
     grid = target.grid()
     smooth = target.smooth_grid(grid)
     peaks = target.peaks()
-    vmax = max(float(np.max(grid)), cfg.target_peak_min_weight, 1e-6)
+    vmax = max(float(np.max(grid)), 1e-6)
     im = ax.imshow(grid, origin="lower", extent=[0, cfg.map_size, 0, cfg.map_size], cmap="magma", vmin=0, vmax=vmax)
     draw_entities(ax, cfg, env, measurements=measurements)
     if peaks:
@@ -143,7 +143,7 @@ def draw_phd(ax, cfg: Config, env: CMUOMMTEnv, target: TargetBelief, measurement
     ax.text(
         1.0,
         3.0,
-        f"total={np.sum(target.weights):.2f}\nraw max={np.max(grid):.3f}\nsmooth max={np.max(smooth):.3f}\nflags={len(peaks)}\nth={cfg.target_peak_min_weight:.2f}",
+        f"total={np.sum(target.weights):.2f}\nraw max={np.max(grid):.3f}\nsmooth max={np.max(smooth):.3f}\nK={len(peaks)}",
         color="white",
         fontsize=7,
         bbox={"facecolor": "black", "alpha": 0.4, "pad": 3},
@@ -378,7 +378,6 @@ def run_visualization(cfg: Config, args) -> dict:
     measurements = np.zeros((0, 2), dtype=np.float32)
     detected_count = 0
     for step in range(args.frames):
-        target.predict()
         batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         actions = policy.select(cfg, batch, rng)
         frame_path = frames_dir / f"frame_{step:03d}.png"
@@ -397,6 +396,7 @@ def run_visualization(cfg: Config, args) -> dict:
 
         waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         info = env.step(waypoints)
+        target.predict(info.step_duration)
         measurements = info.measurements.points
         detected_count = len(info.detected_ids)
         target.update(measurements, env.uav_positions)

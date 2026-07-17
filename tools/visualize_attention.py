@@ -59,7 +59,6 @@ def build_attention_state(cfg: Config, actor: OptionActor, device: torch.device,
     rng = np.random.default_rng(seed + 303)
     builder = worker.node_builder
     for _ in range(max(warmup_steps, 0)):
-        target.predict()
         batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         valid = ~batch.action_mask & ~batch.node_padding_mask
         actions = np.zeros(cfg.n_uavs, dtype=np.int64)
@@ -68,10 +67,10 @@ def build_attention_state(cfg: Config, actor: OptionActor, device: torch.device,
             actions[i] = int(rng.choice(slots)) if len(slots) else 0
         waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         info = env.step(waypoints)
+        target.predict(info.step_duration)
         target.update(info.measurements.points, env.uav_positions)
         tracks.update(env.step_count, info.measurements.points, target.peaks())
         search.update(env.uav_positions, info.measurements.points)
-    target.predict()
     batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
     global_batch = builder.global_batch_from_candidates(
         env.uav_positions,

@@ -101,11 +101,11 @@ def rollout_heuristic(cfg: Config, seed: int, n_targets: int, steps: int):
     selected_waypoints_history = []
     last_batch = None
     for _ in range(steps):
-        target.predict()
         batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         actions = baseline.select(cfg, batch, rng)
         selected_waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         info = env.step(selected_waypoints)
+        target.predict(info.step_duration)
         target.update(info.measurements.points, env.uav_positions)
         tracks.update(env.step_count, info.measurements.points, target.peaks())
         search.update(env.uav_positions, info.measurements.points)

@@ -14,7 +14,9 @@ def reward_terms(
     newly_discovered: int,
     continuous_observed: int,
     estimated_peaks: list[Peak],
+    estimated_count: float,
     true_positions: np.ndarray,
+    target_coverage_counts: np.ndarray,
     previous_coverage_age: np.ndarray,
     uav_positions: np.ndarray,
     step_distance: np.ndarray,
@@ -34,9 +36,31 @@ def reward_terms(
         for j in range(i + 1, len(uav_positions)):
             overlaps.append(circle_overlap_area(np.linalg.norm(uav_positions[i] - uav_positions[j]), cfg.fov_radius) / cfg.fov_area)
     coverage = coverage_age_progress(cfg, previous_coverage_age, uav_positions)
-    phd_position_error, phd_number_error = phd_tracking_errors(estimated_peaks, true_positions)
+    coverage_counts = np.asarray(target_coverage_counts, dtype=np.float32)
+    visibility = float(np.mean(coverage_counts > 0)) if len(coverage_counts) else 0.0
+    discovered = memory.is_discovered
+    if np.any(discovered):
+        horizon = max(float(cfg.maintenance_age_horizon), 1e-8)
+        maintenance_age = float(
+            np.mean(np.clip(memory.current_unobserved_time[discovered] / horizon, 0.0, 1.0))
+        )
+    else:
+        maintenance_age = 0.0
+    duplicate_coverage = float(
+        np.clip(
+            np.sum(np.maximum(coverage_counts - 1.0, 0.0)) / max(cfg.n_uavs, 1),
+            0.0,
+            1.0,
+        )
+    )
+    phd_position_error, phd_number_error = phd_tracking_errors(
+        estimated_peaks, true_positions, estimated_count=estimated_count
+    )
     return {
         "observe": detected_count / max(n_targets, 1),
+        "visibility": visibility,
+        "maintenance_age": maintenance_age,
+        "duplicate_coverage": duplicate_coverage,
         "discover": newly_discovered / max(n_targets, 1),
         "fairness": fairness,
         "continuity": continuous_observed / max(discovered_count, 1),
@@ -72,25 +96,33 @@ def weighted_reward(terms: dict[str, float], cfg: Optional[Config] = None) -> fl
     if cfg is None:
         cfg = Config()
     return (
-        cfg.reward_observe_weight * terms["observe"]
+        cfg.reward_visibility_weight * terms["visibility"]
+        + cfg.reward_maintenance_age_weight * terms["maintenance_age"]
+        + cfg.reward_duplicate_coverage_weight * terms["duplicate_coverage"]
+        + cfg.reward_observe_weight * terms["observe"]
         + cfg.reward_discover_weight * terms["discover"]
         + cfg.reward_continuity_weight * terms["continuity"]
         + cfg.reward_search_weight * terms["search"]
         + cfg.reward_overlap_weight * terms["overlap"]
         + getattr(cfg, "reward_cost_weight", 0.0) * terms["cost"]
         + cfg.reward_miss_weight * terms["miss"]
-        - cfg.reward_phd_position_weight * terms["phd_position_error"]
-        - cfg.reward_phd_number_weight * terms["phd_number_error"]
+        + cfg.reward_phd_position_weight * terms["phd_position_error"]
+        + cfg.reward_phd_number_weight * terms["phd_number_error"]
     )
 
 
-def phd_tracking_errors(estimated_peaks: list[Peak], true_positions: np.ndarray) -> tuple[float, float]:
-    """Return uncapped mean assignment distance and peak-count error."""
+def phd_tracking_errors(
+    estimated_peaks: list[Peak],
+    true_positions: np.ndarray,
+    estimated_count: Optional[float] = None,
+) -> tuple[float, float]:
+    """Return uncapped mean assignment distance and continuous cardinality error."""
     estimated_positions = np.asarray([peak.pos for peak in estimated_peaks], dtype=np.float32).reshape(-1, 2)
     true_positions = np.asarray(true_positions, dtype=np.float32).reshape(-1, 2)
     m = int(len(estimated_positions))
     n = int(len(true_positions))
-    number_error = float(abs(m - n))
+    count = float(m) if estimated_count is None else float(estimated_count)
+    number_error = float(abs(count - n))
     if m == 0 or n == 0:
         return 0.0, number_error
 
@@ -173,7 +205,9 @@ def final_metrics(
     counts = memory.observation_count[discovered] if np.any(discovered) else np.asarray([0])
     fairness = 0.0 if len(counts) == 0 or np.mean(counts) == 0 else float(np.clip(1 - np.std(counts) / (np.mean(counts) + 1e-8), 0, 1))
     estimated_positions = np.asarray([peak.pos for peak in estimated_peaks], dtype=np.float32).reshape(-1, 2)
-    final_position_error, final_number_error = phd_tracking_errors(estimated_peaks, true_positions)
+    final_position_error, final_number_error = phd_tracking_errors(
+        estimated_peaks, true_positions, estimated_count=estimated_count
+    )
     return {
         "mean_reward": float(np.mean(rewards)) if rewards else 0.0,
         "discovery_rate": float(np.mean(discovered)) if len(discovered) else 0.0,

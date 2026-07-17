@@ -442,7 +442,21 @@ def train(
             f"huber_delta={cfg.huber_delta} actor_lr={cfg.actor_lr} critic_lr={cfg.critic_lr} "
             f"adam_eps={cfg.adam_eps} reward_phd_position_weight={cfg.reward_phd_position_weight} "
             f"reward_phd_number_weight={cfg.reward_phd_number_weight} "
+            f"reward_visibility_weight={cfg.reward_visibility_weight} "
+            f"reward_maintenance_age_weight={cfg.reward_maintenance_age_weight} "
+            f"reward_duplicate_coverage_weight={cfg.reward_duplicate_coverage_weight} "
+            f"maintenance_age_horizon={cfg.maintenance_age_horizon} "
             f"reward_overlap_weight={cfg.reward_overlap_weight} reward_cost_weight={cfg.reward_cost_weight} "
+            f"phd_particles={cfg.n_particles_train} filter_p_detection={cfg.filter_p_detection} "
+            f"phd_resampling_mode={cfg.phd_resampling_mode} "
+            f"phd_regularization={cfg.phd_regularization_enabled} "
+            f"phd_velocity_directions={cfg.phd_initial_velocity_directions} "
+            f"phd_birth_scheme={cfg.phd_birth_scheme} "
+            f"phd_birth_probability={cfg.phd_birth_probability} birth_rate={cfg.birth_rate} "
+            f"death_rate={cfg.death_probability} "
+            f"phd_measurement_proposal={cfg.phd_measurement_proposal_enabled} "
+            f"phd_proposal_particles={cfg.phd_measurement_proposal_particles} "
+            f"phd_proposal_mass_fraction={cfg.phd_measurement_proposal_mass_fraction} "
             f"graph_type={cfg.graph_type} prm_random_nodes={cfg.prm_random_nodes} "
             f"prm_sampling={cfg.prm_sampling} prm_jitter_ratio={cfg.prm_jitter_ratio} "
             f"prm_boundary_points_per_side={cfg.prm_boundary_points_per_side} prm_edge_radius={cfg.prm_edge_radius} "
@@ -622,8 +636,35 @@ def main() -> None:
     parser.add_argument("--huber-delta", type=float, default=None)
     parser.add_argument("--reward-overlap-weight", type=float, default=None)
     parser.add_argument("--reward-cost-weight", type=float, default=None)
+    parser.add_argument("--reward-visibility-weight", type=float, default=None)
+    parser.add_argument("--reward-maintenance-age-weight", type=float, default=None)
+    parser.add_argument("--reward-duplicate-coverage-weight", type=float, default=None)
+    parser.add_argument("--maintenance-age-horizon", type=float, default=None)
     parser.add_argument("--reward-phd-position-weight", type=float, default=None)
     parser.add_argument("--reward-phd-number-weight", type=float, default=None)
+    parser.add_argument("--phd-particles", type=int, default=None)
+    parser.add_argument(
+        "--phd-resampling-mode",
+        type=str,
+        choices=["global", "component"],
+        default=None,
+    )
+    parser.add_argument("--no-phd-regularization", action="store_true")
+    parser.add_argument("--phd-velocity-directions", type=int, default=None)
+    parser.add_argument(
+        "--phd-birth-scheme",
+        type=str,
+        choices=["none", "expansion"],
+        default=None,
+    )
+    parser.add_argument("--phd-birth-probability", type=float, default=None)
+    parser.add_argument("--phd-birth-rate", type=float, default=None)
+    parser.add_argument("--phd-death-rate", type=float, default=None)
+    parser.add_argument("--no-phd-measurement-proposal", action="store_true")
+    parser.add_argument("--phd-proposal-particles", type=int, default=None)
+    parser.add_argument("--phd-proposal-mass-fraction", type=float, default=None)
+    parser.add_argument("--phd-proposal-min-component-mass", type=float, default=None)
+    parser.add_argument("--phd-proposal-position-std", type=float, default=None)
     parser.add_argument("--graph-type", type=str, choices=["grid", "prm"], default=None)
     parser.add_argument("--prm-random-nodes", type=int, default=None)
     parser.add_argument("--prm-sampling", type=str, choices=["stratified", "uniform"], default=None)
@@ -693,8 +734,22 @@ def main() -> None:
         "huber_delta": args.huber_delta,
         "reward_overlap_weight": args.reward_overlap_weight,
         "reward_cost_weight": args.reward_cost_weight,
+        "reward_visibility_weight": args.reward_visibility_weight,
+        "reward_maintenance_age_weight": args.reward_maintenance_age_weight,
+        "reward_duplicate_coverage_weight": args.reward_duplicate_coverage_weight,
+        "maintenance_age_horizon": args.maintenance_age_horizon,
         "reward_phd_position_weight": args.reward_phd_position_weight,
         "reward_phd_number_weight": args.reward_phd_number_weight,
+        "phd_resampling_mode": args.phd_resampling_mode,
+        "phd_initial_velocity_directions": args.phd_velocity_directions,
+        "phd_birth_scheme": args.phd_birth_scheme,
+        "phd_birth_probability": args.phd_birth_probability,
+        "birth_rate": args.phd_birth_rate,
+        "death_probability": args.phd_death_rate,
+        "phd_measurement_proposal_particles": args.phd_proposal_particles,
+        "phd_measurement_proposal_mass_fraction": args.phd_proposal_mass_fraction,
+        "phd_measurement_proposal_min_component_mass": args.phd_proposal_min_component_mass,
+        "phd_measurement_proposal_position_std": args.phd_proposal_position_std,
         "graph_type": args.graph_type,
         "prm_random_nodes": args.prm_random_nodes,
         "prm_sampling": args.prm_sampling,
@@ -730,6 +785,13 @@ def main() -> None:
         cfg.use_clipped_value_loss = False
     if args.no_huber_loss:
         cfg.use_huber_loss = False
+    if args.no_phd_regularization:
+        cfg.phd_regularization_enabled = False
+    if args.no_phd_measurement_proposal:
+        cfg.phd_measurement_proposal_enabled = False
+    if args.phd_particles is not None:
+        cfg.n_particles_train = args.phd_particles
+        cfg.n_particles_eval = args.phd_particles
     if args.no_prm_boundary:
         cfg.prm_include_boundary = False
     if args.obstacles:

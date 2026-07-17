@@ -213,7 +213,6 @@ def run_visualized_episode(
     detected_count = 0
 
     for step in range(cfg.episode_steps):
-        target.predict()
         obs, batch, actions, options, terminations, selected_waypoints, log_probs, values, betas = select_policy_actions(
             worker, env, target, search, tracks, prev_option, greedy=greedy
         )
@@ -224,6 +223,7 @@ def run_visualized_episode(
 
         previous_coverage_age = search.coverage_age.copy()
         info = env.step(selected_waypoints)
+        target.predict(info.step_duration)
         target.update(info.measurements.points, env.uav_positions)
         peaks = [] if cfg.disable_phd_belief else target.peaks()
         tracks.update(env.step_count, info.measurements.points, peaks)
@@ -235,6 +235,7 @@ def run_visualized_episode(
             info.newly_discovered,
             info.continuous_observed,
             peaks,
+            float(np.sum(target.weights)),
             env.target_states[:, 0:2],
             previous_coverage_age,
             env.uav_positions,

@@ -91,11 +91,11 @@ def run_rollout(cfg: Config, seed: int, n_targets: int, steps: int, frames: list
     trace.append(summarize_phd(cfg, target, empty_measurements, 0, 0))
 
     for step in range(1, steps + 1):
-        target.predict()
         batch = builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         actions = baseline.select(cfg, batch, rng)
         waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         info = env.step(waypoints)
+        target.predict(info.step_duration)
         target.update(info.measurements.points, env.uav_positions)
         peaks = target.peaks()
         tracks.update(env.step_count, info.measurements.points, peaks)
@@ -115,7 +115,7 @@ def draw_snapshots(cfg: Config, snapshots: list[dict], out: Path) -> None:
     fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols + 0.8, 4.8 * rows), dpi=150)
     axes = np.asarray(axes).reshape(-1)
     vmax = max(float(np.max(s["grid"])) for s in snapshots)
-    vmax = max(vmax, cfg.target_peak_min_weight)
+    vmax = max(vmax, 1e-6)
     for ax, snap in zip(axes, snapshots):
         summary = snap["summary"]
         setup_axis(
@@ -141,13 +141,13 @@ def draw_snapshots(cfg: Config, snapshots: list[dict], out: Path) -> None:
         if snap["peaks"]:
             peak_pos = np.asarray([p for p, _ in snap["peaks"]])
             peak_w = np.asarray([w for _, w in snap["peaks"]])
-            ax.scatter(peak_pos[:, 0], peak_pos[:, 1], marker="P", color="#3288bd", edgecolor="white", s=70, label="PHD peak")
+            ax.scatter(peak_pos[:, 0], peak_pos[:, 1], marker="P", color="#3288bd", edgecolor="white", s=70, label="PHD estimate")
             for pos, weight in zip(peak_pos, peak_w):
                 ax.text(pos[0] + 0.8, pos[1] + 0.8, f"{weight:.2f}", color="white", fontsize=7)
         ax.text(
             1.5,
             3.0,
-            f"threshold={cfg.target_peak_min_weight:.2f}\nmeas={summary['measurement_count']} detected={summary['detected_true_target_count']}",
+            f"K=round(total)={summary['phd_peak_count']}\nmeas={summary['measurement_count']} detected={summary['detected_true_target_count']}",
             color="white",
             fontsize=8,
             bbox={"facecolor": "black", "alpha": 0.35, "pad": 3},
@@ -179,9 +179,7 @@ def draw_trace(trace: list[dict], out: Path, cfg: Config) -> None:
     axes[0].legend(fontsize=8)
 
     axes[1].plot(steps, max_cell, color="#d7191c", linewidth=2)
-    axes[1].axhline(cfg.target_peak_min_weight, color="#2b83ba", linestyle="--", linewidth=1, label="peak threshold")
     axes[1].set_ylabel("max cell")
-    axes[1].legend(fontsize=8)
 
     axes[2].step(steps, peak_count, where="mid", color="#1b9e77", linewidth=2)
     axes[2].set_ylabel("peak count")
@@ -238,7 +236,6 @@ def main() -> None:
             "n_targets": args.n_targets,
             "steps": args.steps,
             "frames": frames,
-            "target_peak_min_weight": cfg.target_peak_min_weight,
             "cell_size": cfg.cell_size,
             "search_bins": cfg.search_bins,
             "n_particles_eval": cfg.n_particles_eval,

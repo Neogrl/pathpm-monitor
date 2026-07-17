@@ -7,6 +7,7 @@ import numpy as np
 
 
 EPS = 1e-8
+_GAUSS_NODES, _GAUSS_WEIGHTS = np.polynomial.legendre.leggauss(32)
 
 
 def clip_points(points: np.ndarray, map_size: float) -> np.ndarray:
@@ -27,6 +28,28 @@ def circle_overlap_area(distance: float, radius: float) -> float:
     if d <= EPS:
         return math.pi * r * r
     return 2 * r * r * math.acos(d / (2 * r)) - 0.5 * d * math.sqrt(max(4 * r * r - d * d, 0.0))
+
+
+def clipped_circle_area(center: np.ndarray, radius: float, map_size: float) -> float:
+    """Area of a circular FOV intersected with the square map."""
+    cx, cy = np.asarray(center, dtype=np.float64)
+    r = float(radius)
+    size = float(map_size)
+    if r <= 0.0 or size <= 0.0:
+        return 0.0
+    if r <= cx <= size - r and r <= cy <= size - r:
+        return math.pi * r * r
+
+    x0 = max(0.0, cx - r)
+    x1 = min(size, cx + r)
+    if x1 <= x0:
+        return 0.0
+    xs = 0.5 * (x1 - x0) * _GAUSS_NODES + 0.5 * (x1 + x0)
+    half_height = np.sqrt(np.maximum(r * r - (xs - cx) ** 2, 0.0))
+    lower = np.maximum(0.0, cy - half_height)
+    upper = np.minimum(size, cy + half_height)
+    heights = np.maximum(upper - lower, 0.0)
+    return float(0.5 * (x1 - x0) * np.dot(_GAUSS_WEIGHTS, heights))
 
 
 def non_max_suppression(points: np.ndarray, scores: np.ndarray, min_distance: float, max_count: int) -> np.ndarray:
@@ -72,4 +95,3 @@ def write_json(path: Path, data: dict) -> None:
 def running_mean(values: Iterable[float]) -> float:
     values = list(values)
     return float(np.mean(values)) if values else 0.0
-

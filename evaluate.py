@@ -71,12 +71,12 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
     overlaps = []
     prev_option = np.zeros(cfg.n_uavs, dtype=np.int64)
     for _ in range(cfg.episode_steps):
-        target.predict()
         batch = node_builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
         actions = baseline.select(cfg, batch, rng)
         selected_waypoints = batch.waypoints[np.arange(cfg.n_uavs), actions]
         previous_coverage_age = search.coverage_age.copy()
         info = env.step(selected_waypoints)
+        target.predict(info.step_duration)
         target.update(info.measurements.points, env.uav_positions)
         peaks = [] if cfg.disable_phd_belief else target.peaks()
         tracks.update(env.step_count, info.measurements.points, peaks)
@@ -88,6 +88,7 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
             info.newly_discovered,
             info.continuous_observed,
             peaks,
+            float(np.sum(target.weights)),
             env.target_states[:, 0:2],
             previous_coverage_age,
             env.uav_positions,

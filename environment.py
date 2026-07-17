@@ -16,6 +16,8 @@ class DiscoveredTruthMemory:
     current_gap: np.ndarray
     max_observation_gap: np.ndarray
     observed_prev: np.ndarray
+    current_unobserved_time: np.ndarray
+    max_unobserved_time: np.ndarray
 
     @classmethod
     def create(cls, n_targets: int) -> "DiscoveredTruthMemory":
@@ -27,10 +29,20 @@ class DiscoveredTruthMemory:
             current_gap=np.zeros(n_targets, dtype=np.int32),
             max_observation_gap=np.zeros(n_targets, dtype=np.int32),
             observed_prev=np.zeros(n_targets, dtype=bool),
+            current_unobserved_time=np.zeros(n_targets, dtype=np.float32),
+            max_unobserved_time=np.zeros(n_targets, dtype=np.float32),
         )
 
-    def update(self, step: int, detected_ids: list[int]) -> dict:
+    def update(
+        self,
+        step: int,
+        detected_ids: list[int],
+        visible_ids: Optional[list[int]] = None,
+        duration: float = 1.0,
+    ) -> dict:
         detected_set = set(detected_ids)
+        visible_set = detected_set if visible_ids is None else set(visible_ids)
+        duration = max(float(duration), 0.0)
         newly = 0
         continuous = 0
         prev_observed = self.observed_prev.copy()
@@ -50,6 +62,15 @@ class DiscoveredTruthMemory:
             elif self.is_discovered[tid]:
                 self.current_gap[tid] += 1
                 self.max_observation_gap[tid] = max(self.max_observation_gap[tid], self.current_gap[tid])
+            if self.is_discovered[tid]:
+                if tid in visible_set:
+                    self.current_unobserved_time[tid] = 0.0
+                else:
+                    self.current_unobserved_time[tid] += duration
+                    self.max_unobserved_time[tid] = max(
+                        self.max_unobserved_time[tid],
+                        self.current_unobserved_time[tid],
+                    )
         return {"newly_discovered": newly, "continuous": continuous}
 
 
@@ -61,6 +82,8 @@ class StepInfo:
     continuous_observed: int
     step_distance: np.ndarray
     step_duration: float
+    visible_target_ids: list[int]
+    target_coverage_counts: np.ndarray
 
 
 class CMUOMMTEnv:
@@ -177,8 +200,22 @@ class CMUOMMTEnv:
     def step(self, waypoints: np.ndarray) -> StepInfo:
         step_distance, step_duration = self._move_uavs(waypoints.astype(np.float32))
         self._move_targets(step_duration)
+        target_distances = np.linalg.norm(
+            self.target_states[:, None, 0:2] - self.uav_positions[None, :, :],
+            axis=2,
+        )
+        target_coverage_counts = np.sum(
+            target_distances <= self.cfg.fov_radius,
+            axis=1,
+        ).astype(np.int32)
+        visible_target_ids = np.flatnonzero(target_coverage_counts > 0).tolist()
         measurements = generate_measurements(self.cfg, self.rng, self.uav_positions, self.target_states)
-        memory_update = self.memory.update(self.step_count, measurements.detected_target_ids)
+        memory_update = self.memory.update(
+            self.step_count,
+            measurements.detected_target_ids,
+            visible_ids=visible_target_ids,
+            duration=step_duration,
+        )
         self.step_count += 1
         return StepInfo(
             measurements=measurements,
@@ -187,6 +224,8 @@ class CMUOMMTEnv:
             continuous_observed=memory_update["continuous"],
             step_distance=step_distance,
             step_duration=step_duration,
+            visible_target_ids=visible_target_ids,
+            target_coverage_counts=target_coverage_counts,
         )
 
     def done(self) -> bool:

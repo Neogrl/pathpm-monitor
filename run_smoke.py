@@ -29,7 +29,6 @@ def main() -> None:
     rollout = PPORolloutBuffer()
     worker = RolloutWorker(cfg, actor=trainer.actor, device=device)
     env, target, search, tracks, _ = worker.reset_stack(args.seed)
-    target.predict()
     graph_batch = worker.node_builder.build(env.uav_positions, target, search, tracks, step=env.step_count)
     global_batch = worker.node_builder.global_batch_from_candidates(
         env.uav_positions,

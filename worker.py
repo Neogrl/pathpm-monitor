@@ -267,6 +267,9 @@ class RolloutWorker:
             "target_estimated_count": [],
             "track_count": [],
             "reward_observe": [],
+            "reward_visibility": [],
+            "reward_maintenance_age": [],
+            "reward_duplicate_coverage": [],
             "reward_discover": [],
             "reward_continuity": [],
             "reward_search": [],
@@ -284,7 +287,6 @@ class RolloutWorker:
             "near_overlap_rate": [],
         }
         for _ in range(self.cfg.episode_steps):
-            target.predict()
             obs, actions, options, terminations, selected_waypoints, log_probs, values, betas = self._joint_obs_and_actions(env, target, search, tracks, prev_option, greedy)
             if replay is not None and pending_transition is not None:
                 # This policy call already produced V(s[t+1]), so reuse it instead of running a second full forward pass.
@@ -299,6 +301,7 @@ class RolloutWorker:
                 diagnostics.setdefault(key, []).append(value)
             previous_coverage_age = search.coverage_age.copy()
             info = env.step(selected_waypoints)
+            target.predict(info.step_duration)
             target.update(info.measurements.points, env.uav_positions)
             peaks = [] if self.cfg.disable_phd_belief else target.peaks()
             tracks.update(env.step_count, info.measurements.points, peaks)
@@ -318,7 +321,9 @@ class RolloutWorker:
                 info.newly_discovered,
                 info.continuous_observed,
                 peaks,
+                float(np.sum(target.weights)),
                 env.target_states[:, 0:2],
+                info.target_coverage_counts,
                 previous_coverage_age,
                 env.uav_positions,
                 info.step_distance,
@@ -326,6 +331,9 @@ class RolloutWorker:
             )
             reward = weighted_reward(terms, self.cfg)
             diagnostics["reward_observe"].append(terms["observe"])
+            diagnostics["reward_visibility"].append(terms["visibility"])
+            diagnostics["reward_maintenance_age"].append(terms["maintenance_age"])
+            diagnostics["reward_duplicate_coverage"].append(terms["duplicate_coverage"])
             diagnostics["reward_discover"].append(terms["discover"])
             diagnostics["reward_continuity"].append(terms["continuity"])
             diagnostics["reward_search"].append(terms["search"])
