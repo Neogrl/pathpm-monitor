@@ -43,6 +43,10 @@ def main() -> None:
     g = global_batch.global_node_inputs.shape[1]
     present = ~graph_batch.node_padding_mask
     assert global_batch.global_node_inputs.shape == (cfg.n_uavs, g, NODE_INPUT_DIM)
+    assert global_batch.spatio_pos_encoding.shape == (cfg.n_uavs, g, cfg.graph_laplacian_pe_dim)
+    assert np.isfinite(global_batch.spatio_pos_encoding).all()
+    assert np.max(np.abs(global_batch.spatio_pos_encoding[0])) > 0.0
+    assert np.allclose(global_batch.spatio_pos_encoding, global_batch.spatio_pos_encoding[0:1])
     assert global_batch.global_edge_mask.shape == (g, g)
     assert global_batch.global_node_padding_mask.shape == (g,)
     assert np.all((global_batch.current_node_indices >= 0) & (global_batch.current_node_indices < g))
@@ -62,6 +66,7 @@ def main() -> None:
     batch = rollout.tensors(cfg.gamma, cfg.gae_lambda, device)
     assert batch["node_inputs"].shape[-1] == NODE_INPUT_DIM
     assert batch["global_node_inputs"].shape[-1] == NODE_INPUT_DIM
+    assert batch["spatio_pos_encoding"].shape[-1] == cfg.graph_laplacian_pe_dim
     assert batch["candidate_node_indices"].shape[-1] == cfg.max_node_candidates
     assert batch["action_mask"].shape[-1] == cfg.max_node_candidates
     assert np.isfinite(stats.policy_loss)
@@ -71,6 +76,7 @@ def main() -> None:
             "rollout_size": len(rollout),
             "node_inputs": tuple(batch["node_inputs"].shape),
             "global_node_inputs": tuple(batch["global_node_inputs"].shape),
+            "spatio_pos_encoding": tuple(batch["spatio_pos_encoding"].shape),
             "candidate_node_indices": tuple(batch["candidate_node_indices"].shape),
             "action_mask": tuple(batch["action_mask"].shape),
             "policy_loss": stats.policy_loss,

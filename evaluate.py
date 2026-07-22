@@ -90,6 +90,7 @@ def evaluate_baseline_episode(cfg: Config, seed: int, baseline_name: str) -> dic
             peaks,
             float(np.sum(target.weights)),
             env.target_states[:, 0:2],
+            info.target_coverage_counts,
             previous_coverage_age,
             env.uav_positions,
             info.step_distance,

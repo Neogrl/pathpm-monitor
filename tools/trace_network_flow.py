@@ -125,6 +125,7 @@ def trace_flow(cfg: Config, actor, torch_obs: Dict[str, torch.Tensor], global_ba
     candidate_rows = []
 
     global_node_inputs = torch_obs["global_node_inputs"]
+    spatio_pos_encoding = torch_obs["spatio_pos_encoding"]
     global_edge_mask = torch_obs["global_edge_mask"]
     global_node_padding_mask = torch_obs["global_node_padding_mask"]
     current_node_indices = torch_obs["current_node_indices"]
@@ -155,6 +156,10 @@ def trace_flow(cfg: Config, actor, torch_obs: Dict[str, torch.Tensor], global_ba
 
     flat_nodes = global_node_inputs.reshape(b * n, g, -1)
     actor_src = actor.actor_initial_embedding(flat_nodes)
+    if cfg.graph_laplacian_pe_enabled:
+        actor_src = actor_src + actor.actor_spatio_pos_embedding(
+            spatio_pos_encoding.reshape(b * n, g, -1)
+        )
     rows.append(tensor_stats("actor.initial_embedding(flat_global_nodes)", actor_src))
 
     actor_attention_layers = []
@@ -228,6 +233,10 @@ def trace_flow(cfg: Config, actor, torch_obs: Dict[str, torch.Tensor], global_ba
 
     critic_mask, critic_padding = actor._global_masks(global_edge_mask, global_node_padding_mask, b, n, g)
     critic_src = actor.critic_initial_embedding(flat_nodes)
+    if cfg.graph_laplacian_pe_enabled:
+        critic_src = critic_src + actor.critic_spatio_pos_embedding(
+            spatio_pos_encoding.reshape(b * n, g, -1)
+        )
     rows.append(tensor_stats("critic.initial_embedding(flat_global_nodes)", critic_src))
     critic_attention_entropy = []
     critic_layer_src = critic_src

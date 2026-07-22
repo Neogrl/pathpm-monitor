@@ -64,6 +64,7 @@ class Trainer:
         global_node_padding_mask = batch.get("global_node_padding_mask", self.global_node_padding_mask)
         return (
             batch["global_node_inputs"].float(),
+            batch["spatio_pos_encoding"].float(),
             global_edge_mask.bool(),
             global_node_padding_mask.bool(),
             batch["current_node_indices"].long(),
@@ -194,9 +195,18 @@ class Trainer:
             ckpt = torch.load(path, map_location=self.device, weights_only=True)
         except TypeError:
             ckpt = torch.load(path, map_location=self.device)
-        self.actor.load_state_dict(ckpt["actor"])
-        if "optimizer" in ckpt:
+        incompatible = self.actor.load_state_dict(ckpt["actor"], strict=False)
+        allowed_missing = {"actor_agent_embedding.weight"}
+        unexpected = set(incompatible.unexpected_keys)
+        missing = set(incompatible.missing_keys)
+        if unexpected or not missing.issubset(allowed_missing):
+            raise RuntimeError(f"Checkpoint model mismatch: missing={sorted(missing)} unexpected={sorted(unexpected)}")
+        migrated_old_actor = bool(missing)
+        if migrated_old_actor:
+            # A zero embedding preserves the old shared-policy behavior for evaluation.
+            torch.nn.init.zeros_(self.actor.actor_agent_embedding.weight)
+        if "optimizer" in ckpt and not migrated_old_actor:
             self.optimizer.load_state_dict(ckpt["optimizer"])
-        if "lr_scheduler" in ckpt:
+        if "lr_scheduler" in ckpt and not migrated_old_actor:
             self.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
         self.update_count = int(ckpt.get("update_count", 0))

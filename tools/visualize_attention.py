@@ -115,6 +115,7 @@ def multihead_attention_weights(attention, query: torch.Tensor, key: torch.Tenso
 @torch.no_grad()
 def compute_attention(actor: OptionActor, torch_obs: dict[str, torch.Tensor]) -> dict:
     global_node_inputs = torch_obs["global_node_inputs"]
+    spatio_pos_encoding = torch_obs["spatio_pos_encoding"]
     global_edge_mask = torch_obs["global_edge_mask"]
     global_node_padding_mask = torch_obs["global_node_padding_mask"]
     current_node_indices = torch_obs["current_node_indices"]
@@ -127,13 +128,21 @@ def compute_attention(actor: OptionActor, torch_obs: dict[str, torch.Tensor]) ->
     encoder_mask, global_padding = actor._global_masks(global_edge_mask, global_node_padding_mask, b, n, g)
     flat_nodes = global_node_inputs.reshape(b * n, g, -1)
     src = actor.actor_initial_embedding(flat_nodes)
+    if actor.cfg.graph_laplacian_pe_enabled:
+        src = src + actor.actor_spatio_pos_embedding(
+            spatio_pos_encoding.reshape(b * n, g, -1)
+        )
 
     encoder_current_attention = []
+    encoder_attention_matrices = []
     layer_src = src
     flat_current = current_node_indices.reshape(b * n)
     for layer in actor.actor_encoder.layers:
         normed = layer.norm1(layer_src)
         weights = multihead_attention_weights(layer.attention, normed, normed, encoder_mask)
+        encoder_attention_matrices.append(
+            weights.mean(dim=0).reshape(b, n, g, g).detach().cpu()
+        )
         current_weights = weights[:, torch.arange(b * n, device=flat_current.device), flat_current, :]
         encoder_current_attention.append(current_weights.mean(dim=0).reshape(b, n, g).detach().cpu())
         layer_src = layer(layer_src, encoder_mask)
@@ -164,6 +173,7 @@ def compute_attention(actor: OptionActor, torch_obs: dict[str, torch.Tensor]) ->
 
     return {
         "encoder_current_attention": encoder_current_attention,
+        "encoder_attention_matrices": encoder_attention_matrices,
         "decoder_attention": decoder_attention,
         "pointer_probs": pointer_probs,
         "greedy_actions": greedy_actions,
@@ -187,12 +197,68 @@ def draw_global_self_attention(path: Path, cfg: Config, env, global_batch, atten
         axes = [axes]
     for layer_idx, ax in enumerate(axes):
         weights = attention_layers[layer_idx][0, uav_id].numpy()
-        setup_axis(ax, cfg, f"Actor self-attention | UAV {uav_id} layer {layer_idx}")
+        setup_axis(ax, cfg, f"Actor self-attention | UAV {uav_id} layer {layer_idx + 1}")
         sc = ax.scatter(positions[:, 0], positions[:, 1], c=weights, cmap="viridis", s=28, vmin=0, vmax=max(float(weights.max()), 1e-9))
         cur_idx = int(global_batch.current_node_indices[uav_id])
         ax.scatter(positions[cur_idx, 0], positions[cur_idx, 1], marker="*", color="white", edgecolor="black", s=130)
         draw_entities(ax, cfg, env)
         plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.03, label="mean head attention")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def draw_global_self_attention_all_uavs(
+    path: Path,
+    cfg: Config,
+    env,
+    global_batch,
+    attention_layer: torch.Tensor,
+) -> None:
+    positions = global_batch.node_positions
+    fig, axes = plt.subplots(1, cfg.n_uavs, figsize=(4.2 * cfg.n_uavs, 4.2), dpi=145)
+    if cfg.n_uavs == 1:
+        axes = [axes]
+    for uav_id, ax in enumerate(axes):
+        weights = attention_layer[0, uav_id].numpy()
+        setup_axis(ax, cfg, f"Global attention from current node | U{uav_id}")
+        sc = ax.scatter(
+            positions[:, 0],
+            positions[:, 1],
+            c=weights,
+            cmap="viridis",
+            s=23,
+            vmin=0,
+            vmax=max(float(weights.max()), 1e-9),
+        )
+        cur_idx = int(global_batch.current_node_indices[uav_id])
+        ax.scatter(
+            positions[cur_idx, 0],
+            positions[cur_idx, 1],
+            marker="*",
+            color="white",
+            edgecolor="black",
+            s=125,
+        )
+        draw_entities(ax, cfg, env)
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.03)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def draw_global_attention_matrix(
+    path: Path,
+    attention_matrix: torch.Tensor,
+    uav_id: int,
+) -> None:
+    matrix = attention_matrix[0, uav_id].numpy()
+    fig, ax = plt.subplots(figsize=(7.2, 6.2), dpi=150)
+    image = ax.imshow(matrix, aspect="auto", cmap="viridis", interpolation="nearest")
+    ax.set_title(f"Global self-attention matrix | UAV {uav_id}")
+    ax.set_xlabel("Key global node index")
+    ax.set_ylabel("Query global node index")
+    plt.colorbar(image, ax=ax, fraction=0.046, pad=0.03, label="mean head attention")
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -341,6 +407,18 @@ def main() -> None:
     uav_id = int(np.clip(args.uav_id, 0, cfg.n_uavs - 1))
 
     draw_global_self_attention(out / f"actor_self_attention_uav{uav_id}.png", cfg, env, global_batch, attention["encoder_current_attention"], uav_id)
+    draw_global_self_attention_all_uavs(
+        out / "actor_global_attention_all_uavs.png",
+        cfg,
+        env,
+        global_batch,
+        attention["encoder_current_attention"][-1],
+    )
+    draw_global_attention_matrix(
+        out / f"actor_global_attention_matrix_uav{uav_id}.png",
+        attention["encoder_attention_matrices"][-1],
+        uav_id,
+    )
     draw_decoder_attention(out / "actor_decoder_attention_all_uavs.png", cfg, env, batch, attention["decoder_attention"])
     draw_pointer_attention(out / "pointer_candidate_attention.png", cfg, env, batch, attention["pointer_probs"], attention["greedy_actions"])
 
@@ -353,11 +431,15 @@ def main() -> None:
         "warmup_steps": args.warmup_steps,
         "n_uavs": cfg.n_uavs,
         "n_global_nodes": int(global_batch.global_node_inputs.shape[1]),
+        "graph_encoder_layers": cfg.graph_encoder_layers,
+        "graph_laplacian_pe_dim": cfg.graph_laplacian_pe_dim,
         "node_input_fields": NODE_INPUT_FIELDS,
         "checkpoint": args.checkpoint,
         "note": "No training is run. If checkpoint is null, attention comes from the current randomly initialized model.",
         "outputs": {
             "actor_self_attention": str(out / f"actor_self_attention_uav{uav_id}.png"),
+            "actor_global_attention_all_uavs": str(out / "actor_global_attention_all_uavs.png"),
+            "actor_global_attention_matrix": str(out / f"actor_global_attention_matrix_uav{uav_id}.png"),
             "actor_decoder_attention": str(out / "actor_decoder_attention_all_uavs.png"),
             "pointer_candidate_attention": str(out / "pointer_candidate_attention.png"),
             "pointer_csv": str(out / "pointer_candidate_attention.csv"),

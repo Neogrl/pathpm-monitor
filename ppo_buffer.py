@@ -45,6 +45,7 @@ class PPORolloutBuffer:
 
         keys = [
             "global_node_inputs",
+            "spatio_pos_encoding",
             "global_edge_mask",
             "global_node_padding_mask",
             "current_node_indices",

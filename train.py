@@ -61,6 +61,45 @@ def apply_ablation(cfg: Config, ablation: Optional[str]) -> None:
 
 
 class TrainingLogger:
+    TENSORBOARD_METRICS = {
+        "episode_reward": "01_Train/episode_return",
+        "observation_rate": "01_Train/observation_rate",
+        "reward_visibility": "01_Train/target_visibility_rate",
+        "discovery_rate": "01_Train/discovery_rate",
+        "reward_maintenance_age": "01_Train/maintenance_age_ratio",
+        "reward_duplicate_coverage": "01_Train/duplicate_coverage_rate",
+        "reward_coverage": "01_Train/map_coverage_gain",
+        "same_node_conflict_rate": "01_Train/same_node_conflict_rate",
+        "val_episode_reward": "02_Validation/episode_return",
+        "val_observation_rate": "02_Validation/observation_rate",
+        "val_reward_visibility": "02_Validation/target_visibility_rate",
+        "val_discovery_rate": "02_Validation/discovery_rate",
+        "val_reward_maintenance_age": "02_Validation/maintenance_age_ratio",
+        "val_reward_duplicate_coverage": "02_Validation/duplicate_coverage_rate",
+        "val_reward_coverage": "02_Validation/map_coverage_gain",
+        "val_same_node_conflict_rate": "02_Validation/same_node_conflict_rate",
+        "policy_loss": "03_Optimization/policy_loss",
+        "value_loss": "03_Optimization/value_loss",
+        "entropy": "03_Optimization/policy_entropy",
+        "approx_kl": "03_Optimization/approx_kl",
+        "clipfrac": "03_Optimization/policy_clip_fraction",
+        "value_clipfrac": "03_Optimization/value_clip_fraction",
+        "grad_norm": "03_Optimization/gradient_norm",
+        "learning_rate": "03_Optimization/learning_rate",
+        "phd_total_weight": "04_PHD/train_estimated_target_count",
+        "phd_number_error": "04_PHD/train_target_count_error",
+        "phd_position_error": "04_PHD/train_position_error",
+        "OSPA": "04_PHD/train_ospa",
+        "val_phd_total_weight": "04_PHD/validation_estimated_target_count",
+        "val_phd_number_error": "04_PHD/validation_target_count_error",
+        "val_phd_position_error": "04_PHD/validation_position_error",
+        "val_OSPA": "04_PHD/validation_ospa",
+        "rollout_seconds": "05_Performance/rollout_seconds",
+        "ppo_update_seconds": "05_Performance/ppo_update_seconds",
+        "collection_seconds": "05_Performance/collection_seconds",
+        "rollout_steps_per_second": "05_Performance/rollout_steps_per_second",
+    }
+
     def __init__(self, out: Path, run_name: str, use_tensorboard: bool = True, use_wandb: bool = False):
         self.writer = None
         self.wandb = None
@@ -80,42 +119,20 @@ class TrainingLogger:
             except Exception as exc:
                 print(f"W&B disabled: {exc}")
 
-    @staticmethod
-    def _group(key: str) -> str:
-        if key in {"rollout_seconds", "ppo_update_seconds", "collection_seconds", "rollout_steps_per_second"}:
-            return "timing"
-        if key.startswith("val_"):
-            return "val"
-        if key.startswith("reward_"):
-            return "reward_terms"
-        if key in {"policy_loss", "value_loss", "entropy", "approx_kl", "clipfrac", "loss", "grad_norm", "ratio", "value_clipfrac", "switch_loss", "learning_rate"}:
-            return "ppo"
-        if key in {"mean_beta", "switch_rate", "option_0_ratio", "option_1_ratio"}:
-            return "options"
-        if key in {"mean_reward", "episode_reward", "return_mean", "advantage_mean", "reward_mean"}:
-            return "returns"
-        if key in {
-            "discovery_rate",
-            "observation_rate",
-            "continuity",
-            "miss_violation_rate",
-            "OSPA",
-            "cardinality_error",
-            "phd_position_error",
-            "phd_number_error",
-            "phd_total_weight",
-            "phd_peak_count",
-            "final_phd_position_error",
-            "final_phd_number_error",
-        }:
-            return "task"
-        return "metrics"
+    @classmethod
+    def tensorboard_scalars(cls, row: dict) -> dict[str, float]:
+        scalars: dict[str, float] = {}
+        for source_name, tensorboard_name in cls.TENSORBOARD_METRICS.items():
+            value = row.get(source_name)
+            if isinstance(value, (int, float, np.floating, np.integer)) and not np.isnan(float(value)):
+                scalars[tensorboard_name] = float(value)
+        return scalars
 
     def log(self, row: dict, step: int) -> None:
-        numeric = {k: float(v) for k, v in row.items() if isinstance(v, (int, float, np.floating, np.integer)) and not np.isnan(float(v))}
+        numeric = self.tensorboard_scalars(row)
         if self.writer is not None:
             for key, value in numeric.items():
-                self.writer.add_scalar(f"{self._group(key)}/{key}", value, step)
+                self.writer.add_scalar(key, value, step)
             self.writer.flush()
         if self.wandb is not None:
             self.wandb.log(numeric, step=step)
@@ -420,7 +437,6 @@ def train(
     seed: int,
     run_name: str,
     resume: bool = False,
-    validation_metric: str = "val_discovery_rate",
     best_metric: Optional[str] = None,
     use_tensorboard: bool = True,
     use_wandb: bool = False,
@@ -433,6 +449,9 @@ def train(
     with ConsoleLogCapture(out / log_file, append=resume):
         write_json(out / "config.json", asdict(cfg))
         logger = TrainingLogger(out, run_name, use_tensorboard=use_tensorboard, use_wandb=use_wandb)
+        selected_best_metric = best_metric or cfg.best_metric
+        if not selected_best_metric.startswith("val_"):
+            raise ValueError(f"best_metric must be a validation metric beginning with 'val_', got {selected_best_metric!r}")
         print(
             "[train] start "
             f"run_name={run_name} updates={updates} steps={steps} seed={seed} device={cfg.device} "
@@ -444,6 +463,7 @@ def train(
             f"reward_phd_number_weight={cfg.reward_phd_number_weight} "
             f"reward_visibility_weight={cfg.reward_visibility_weight} "
             f"reward_maintenance_age_weight={cfg.reward_maintenance_age_weight} "
+            f"reward_coverage_weight={cfg.reward_search_weight} "
             f"reward_duplicate_coverage_weight={cfg.reward_duplicate_coverage_weight} "
             f"maintenance_age_horizon={cfg.maintenance_age_horizon} "
             f"reward_overlap_weight={cfg.reward_overlap_weight} reward_cost_weight={cfg.reward_cost_weight} "
@@ -466,7 +486,7 @@ def train(
             f"rollout_gpus_per_worker={cfg.rollout_gpus_per_worker} worker_num_threads={cfg.worker_num_threads} "
             f"rollout_device={cfg.rollout_device} eval_interval={cfg.eval_interval} "
             f"eval_episodes={cfg.eval_episodes} log_interval={cfg.log_interval} "
-            f"checkpoint_episode_interval={cfg.checkpoint_episode_interval} best_metric={best_metric or cfg.best_metric} "
+            f"checkpoint_episode_interval={cfg.checkpoint_episode_interval} best_metric={selected_best_metric} "
             f"disable_options={cfg.disable_options} disable_termination={cfg.disable_termination} "
             f"tensorboard={use_tensorboard} wandb={use_wandb} out={out}",
             flush=True,
@@ -507,8 +527,7 @@ def train(
                 completed_episodes = start_update * max(cfg.episodes_per_collection, 1)
                 episode_seed = seed + completed_episodes
             best_summary = read_json(out / "best_summary.json")
-            best_metric_name = validation_metric if validation_metric in best_summary else (best_metric or cfg.best_metric)
-            best_candidate = best_summary.get(best_metric_name)
+            best_candidate = best_summary.get(selected_best_metric)
             if isinstance(best_candidate, (int, float)) and not np.isnan(float(best_candidate)):
                 best_value = float(best_candidate)
             print(
@@ -562,13 +581,12 @@ def train(
                     val_metrics = evaluate_actor(cfg, trainer, cfg.eval_episodes, cfg.validation_seed)
                     row.update(val_metrics)
 
-                metric_name = validation_metric if validation_metric in row else (best_metric or cfg.best_metric)
-                metric_value = row.get(metric_name, -float("inf"))
+                metric_value = row.get(selected_best_metric) if should_eval else None
                 if isinstance(metric_value, (int, float)) and not np.isnan(metric_value) and metric_value > best_value:
                     best_value = float(metric_value)
                     best_summary = row.copy()
                     trainer.save(out / "best.pt")
-                    print(f"[train] update {update + 1}/{updates}: saved best {metric_name}={best_value:.4f}", flush=True)
+                    print(f"[train] update {update + 1}/{updates}: saved best {selected_best_metric}={best_value:.4f}", flush=True)
 
                 rows.append(row)
                 logger.log(row, completed_episodes)
@@ -639,6 +657,8 @@ def main() -> None:
     parser.add_argument("--reward-visibility-weight", type=float, default=None)
     parser.add_argument("--reward-maintenance-age-weight", type=float, default=None)
     parser.add_argument("--reward-duplicate-coverage-weight", type=float, default=None)
+    parser.add_argument("--reward-coverage-weight", type=float, default=None)
+    parser.add_argument("--reward-search-weight", type=float, default=None, help="Deprecated alias for --reward-coverage-weight.")
     parser.add_argument("--maintenance-age-horizon", type=float, default=None)
     parser.add_argument("--reward-phd-position-weight", type=float, default=None)
     parser.add_argument("--reward-phd-number-weight", type=float, default=None)
@@ -672,6 +692,8 @@ def main() -> None:
     parser.add_argument("--prm-boundary-points-per-side", type=int, default=None)
     parser.add_argument("--prm-edge-radius", type=float, default=None)
     parser.add_argument("--prm-min-node-distance", type=float, default=None)
+    parser.add_argument("--no-graph-laplacian-pe", action="store_true")
+    parser.add_argument("--graph-encoder-layers", type=int, default=None)
     parser.add_argument("--no-prm-boundary", action="store_true")
     parser.add_argument("--obstacles", action="store_true")
     parser.add_argument("--obstacle-count", type=int, default=None)
@@ -697,7 +719,7 @@ def main() -> None:
     parser.add_argument("--log-file", type=str, default="train.log")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--validation-metric", type=str, default="val_discovery_rate")
+    parser.add_argument("--validation-metric", type=str, default=None, help="Deprecated alias for --best-metric.")
     parser.add_argument("--no-tensorboard", action="store_true")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--use-option-critic", action="store_true", help="Enable learned option and termination heads. Disabled by default for stage 1.")
@@ -708,6 +730,19 @@ def main() -> None:
         default=None,
     )
     args = parser.parse_args()
+
+    if args.best_metric is not None and args.validation_metric is not None and args.best_metric != args.validation_metric:
+        parser.error("--best-metric and deprecated --validation-metric must not disagree")
+    requested_best_metric = args.best_metric or args.validation_metric
+    if (
+        args.reward_coverage_weight is not None
+        and args.reward_search_weight is not None
+        and args.reward_coverage_weight != args.reward_search_weight
+    ):
+        parser.error("--reward-coverage-weight and deprecated --reward-search-weight must not disagree")
+    requested_coverage_weight = args.reward_coverage_weight
+    if requested_coverage_weight is None:
+        requested_coverage_weight = args.reward_search_weight
 
     cfg = Config()
     episodes_per_collection = (
@@ -737,6 +772,7 @@ def main() -> None:
         "reward_visibility_weight": args.reward_visibility_weight,
         "reward_maintenance_age_weight": args.reward_maintenance_age_weight,
         "reward_duplicate_coverage_weight": args.reward_duplicate_coverage_weight,
+        "reward_search_weight": requested_coverage_weight,
         "maintenance_age_horizon": args.maintenance_age_horizon,
         "reward_phd_position_weight": args.reward_phd_position_weight,
         "reward_phd_number_weight": args.reward_phd_number_weight,
@@ -757,6 +793,7 @@ def main() -> None:
         "prm_boundary_points_per_side": args.prm_boundary_points_per_side,
         "prm_edge_radius": args.prm_edge_radius,
         "prm_min_node_distance": args.prm_min_node_distance,
+        "graph_encoder_layers": args.graph_encoder_layers,
         "obstacle_count": args.obstacle_count,
         "obstacle_radius_min": args.obstacle_radius_min,
         "obstacle_radius_max": args.obstacle_radius_max,
@@ -772,7 +809,7 @@ def main() -> None:
         "eval_episodes": args.eval_episodes,
         "log_interval": args.log_interval,
         "checkpoint_episode_interval": checkpoint_episode_interval,
-        "best_metric": args.best_metric,
+        "best_metric": requested_best_metric,
         "device": args.device,
     }
     for key, value in overrides.items():
@@ -794,6 +831,8 @@ def main() -> None:
         cfg.n_particles_eval = args.phd_particles
     if args.no_prm_boundary:
         cfg.prm_include_boundary = False
+    if args.no_graph_laplacian_pe:
+        cfg.graph_laplacian_pe_enabled = False
     if args.obstacles:
         cfg.obstacles_enabled = True
     apply_ablation(cfg, args.ablation)
@@ -805,8 +844,7 @@ def main() -> None:
         args.seed,
         args.run_name,
         resume=args.resume,
-        validation_metric=args.validation_metric,
-        best_metric=args.best_metric,
+        best_metric=requested_best_metric,
         use_tensorboard=not args.no_tensorboard,
         use_wandb=args.wandb,
         log_file=args.log_file,

@@ -141,17 +141,19 @@ class OptionActor(nn.Module):
         self.cfg = cfg
         e = cfg.embed_dim
         self.actor_initial_embedding = nn.Linear(cfg.node_input_dim, e)
-        # Reserved for STAMP-style graph positional encoding:
-        # self.spatio_pos_embedding = nn.Linear(cfg.graph_laplacian_pe_dim, e)
-        self.actor_encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=3)
+        self.actor_spatio_pos_embedding = nn.Linear(cfg.graph_laplacian_pe_dim, e, bias=False)
+        self.actor_encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=cfg.graph_encoder_layers)
         self.actor_decoder = Decoder(embedding_dim=e, n_heads=8, n_layers=1)
         self.pointer = SingleHeadAttention(e)
+        self.actor_agent_embedding = nn.Embedding(cfg.n_uavs, e)
+        nn.init.normal_(self.actor_agent_embedding.weight, mean=0.0, std=0.02)
         self.termination_head = nn.Sequential(nn.Linear(e, 64), nn.ReLU(inplace=True), nn.Linear(64, 1))
         self.option_embedding_for_termination = nn.Embedding(2, e)
         self.option_embedding_for_policy = nn.Embedding(2, e)
 
         self.critic_initial_embedding = nn.Linear(cfg.node_input_dim, e)
-        self.critic_encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=3)
+        self.critic_spatio_pos_embedding = nn.Linear(cfg.graph_laplacian_pe_dim, e, bias=False)
+        self.critic_encoder = Encoder(embedding_dim=e, n_heads=8, n_layers=cfg.graph_encoder_layers)
         self.critic_uav_encoder = nn.Sequential(nn.Linear(cfg.uav_state_dim, e), nn.ReLU(inplace=True), nn.Linear(e, e))
         self.critic_state_embedding = nn.Linear(e * 2, e)
         self.value_head = nn.Sequential(nn.Linear(e, e), nn.ReLU(inplace=True), nn.Linear(e, 1))
@@ -183,17 +185,25 @@ class OptionActor(nn.Module):
     def _encode_global_with(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         initial_embedding: nn.Linear,
+        positional_embedding: nn.Linear,
         encoder: Encoder,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, n, g, _ = global_node_inputs.shape
         encoder_mask, padding = self._global_masks(global_edge_mask, global_node_padding_mask, b, n, g)
         flat_nodes = global_node_inputs.reshape(b * n, g, -1)
         embedded = initial_embedding(flat_nodes)
-        # Future STAMP-style graph PE path:
-        # embedded = embedded + self.spatio_pos_embedding(spatio_pos_encoding.reshape(b * n, g, -1))
+        if self.cfg.graph_laplacian_pe_enabled:
+            expected = (b, n, g, self.cfg.graph_laplacian_pe_dim)
+            if tuple(spatio_pos_encoding.shape) != expected:
+                raise ValueError(
+                    f"spatio_pos_encoding must have shape {expected}, got {tuple(spatio_pos_encoding.shape)}"
+                )
+            flat_position = spatio_pos_encoding.reshape(b * n, g, -1).float()
+            embedded = embedded + positional_embedding(flat_position)
         encoded = encoder(embedded, encoder_mask)
         encoded = encoded.masked_fill(padding.reshape(b * n, g, 1), 0.0)
         valid = (~padding).float().unsqueeze(-1)
@@ -203,28 +213,34 @@ class OptionActor(nn.Module):
     def _encode_actor_global(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self._encode_global_with(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
             self.actor_initial_embedding,
+            self.actor_spatio_pos_embedding,
             self.actor_encoder,
         )
 
     def _encode_critic_global(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self._encode_global_with(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
             self.critic_initial_embedding,
+            self.critic_spatio_pos_embedding,
             self.critic_encoder,
         )
 
@@ -244,6 +260,7 @@ class OptionActor(nn.Module):
     def _critic_value(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         current_node_indices: torch.Tensor,
@@ -251,6 +268,7 @@ class OptionActor(nn.Module):
     ) -> torch.Tensor:
         critic_encoded, _, critic_pooled = self._encode_critic_global(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
         )
@@ -263,6 +281,7 @@ class OptionActor(nn.Module):
     def termination_logits(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         current_node_indices: torch.Tensor,
@@ -273,13 +292,21 @@ class OptionActor(nn.Module):
         prev_option: torch.Tensor,
     ) -> torch.Tensor:
         del candidate_node_indices, candidate_padding_mask, action_mask, uav_state
-        encoded, _, _ = self._encode_actor_global(global_node_inputs, global_edge_mask, global_node_padding_mask)
+        encoded, _, _ = self._encode_actor_global(
+            global_node_inputs, spatio_pos_encoding, global_edge_mask, global_node_padding_mask
+        )
         current_feature = self._gather_current(encoded, current_node_indices)
-        return self.termination_head(current_feature + self.option_embedding_for_termination(prev_option.long())).squeeze(-1)
+        b, n, _ = current_feature.shape
+        agent_ids = torch.arange(n, device=current_feature.device).view(1, n).expand(b, n)
+        agent_feature = self.actor_agent_embedding(agent_ids)
+        return self.termination_head(
+            current_feature + agent_feature + self.option_embedding_for_termination(prev_option.long())
+        ).squeeze(-1)
 
     def forward(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         current_node_indices: torch.Tensor,
@@ -292,18 +319,22 @@ class OptionActor(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, n, g, _ = global_node_inputs.shape
         m = candidate_node_indices.shape[-1]
-        encoded, _, _ = self._encode_actor_global(global_node_inputs, global_edge_mask, global_node_padding_mask)
+        encoded, _, _ = self._encode_actor_global(
+            global_node_inputs, spatio_pos_encoding, global_edge_mask, global_node_padding_mask
+        )
         current_feature = self._gather_current(encoded, current_node_indices)
         candidate_feature = self._gather_candidates(encoded, candidate_node_indices)
+        agent_ids = torch.arange(n, device=current_feature.device).view(1, n).expand(b, n)
+        agent_feature = self.actor_agent_embedding(agent_ids)
         if self.cfg.disable_options:
             current_option = torch.zeros_like(prev_option.long())
             termination_logits = torch.full_like(prev_option.float(), -20.0)
         else:
-            prev_feature = current_feature + self.option_embedding_for_termination(prev_option.long())
+            prev_feature = current_feature + agent_feature + self.option_embedding_for_termination(prev_option.long())
             termination_logits = self.termination_head(prev_feature).squeeze(-1)
             if current_option is None:
                 current_option = prev_option.long()
-        query = current_feature
+        query = current_feature + agent_feature
         if not self.cfg.disable_options:
             query = query + self.option_embedding_for_policy(current_option.long())
         flat_query = query.reshape(b * n, 1, -1)
@@ -314,6 +345,7 @@ class OptionActor(nn.Module):
         waypoint_logits = masked_logits(logp.reshape(b, n, m), action_mask | candidate_padding_mask | (candidate_node_indices < 0))
         values = self._critic_value(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
             current_node_indices,
@@ -325,6 +357,7 @@ class OptionActor(nn.Module):
     def act(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         current_node_indices: torch.Tensor,
@@ -337,6 +370,7 @@ class OptionActor(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         action, option, terminate, _, _, _ = self.act_with_info(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
             current_node_indices,
@@ -352,6 +386,7 @@ class OptionActor(nn.Module):
     def evaluate_actions(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         current_node_indices: torch.Tensor,
@@ -368,6 +403,7 @@ class OptionActor(nn.Module):
         current_option = torch.where(terminations.bool(), 1 - prev_option.long(), prev_option.long())
         termination_logits, logits, values = self.forward(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
             current_node_indices,
@@ -396,6 +432,7 @@ class OptionActor(nn.Module):
     def act_with_info(
         self,
         global_node_inputs: torch.Tensor,
+        spatio_pos_encoding: torch.Tensor,
         global_edge_mask: torch.Tensor,
         global_node_padding_mask: torch.Tensor,
         current_node_indices: torch.Tensor,
@@ -413,6 +450,7 @@ class OptionActor(nn.Module):
         else:
             termination_logits = self.termination_logits(
                 global_node_inputs,
+                spatio_pos_encoding,
                 global_edge_mask,
                 global_node_padding_mask,
                 current_node_indices,
@@ -429,6 +467,7 @@ class OptionActor(nn.Module):
             option = torch.zeros_like(prev_option.long())
         _, logits, values = self.forward(
             global_node_inputs,
+            spatio_pos_encoding,
             global_edge_mask,
             global_node_padding_mask,
             current_node_indices,

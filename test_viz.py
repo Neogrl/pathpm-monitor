@@ -237,6 +237,7 @@ def run_visualized_episode(
             peaks,
             float(np.sum(target.weights)),
             env.target_states[:, 0:2],
+            info.target_coverage_counts,
             previous_coverage_age,
             env.uav_positions,
             info.step_distance,
@@ -263,6 +264,9 @@ def run_visualized_episode(
             "target_estimated_count": float(np.sum(target.weights)),
             "track_count": float(len(tracks.tracks)),
             "reward_observe": terms["observe"],
+            "reward_visibility": terms["visibility"],
+            "reward_maintenance_age": terms["maintenance_age"],
+            "reward_duplicate_coverage": terms["duplicate_coverage"],
             "reward_discover": terms["discover"],
             "reward_continuity": terms["continuity"],
             "reward_search": terms["search"],
@@ -320,6 +324,9 @@ def run_visualized_episode(
         "target_estimated_count",
         "track_count",
         "reward_observe",
+        "reward_visibility",
+        "reward_maintenance_age",
+        "reward_duplicate_coverage",
         "reward_discover",
         "reward_continuity",
         "reward_search",
@@ -367,6 +374,10 @@ def main() -> None:
     parser.add_argument("--viz-seed", type=int, default=None)
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--n-targets", type=int, default=None)
+    parser.add_argument("--target-speed", type=float, default=None)
+    parser.add_argument("--target-velocity-noise-std", type=float, default=None)
+    parser.add_argument("--reward-coverage-weight", type=float, default=None)
+    parser.add_argument("--reward-search-weight", type=float, default=None, help="Deprecated alias for --reward-coverage-weight.")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--graph-type", type=str, choices=["grid", "prm"], default=None)
     parser.add_argument("--prm-random-nodes", type=int, default=None)
@@ -398,11 +409,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if (
+        args.reward_coverage_weight is not None
+        and args.reward_search_weight is not None
+        and args.reward_coverage_weight != args.reward_search_weight
+    ):
+        parser.error("--reward-coverage-weight and deprecated --reward-search-weight must not disagree")
+    requested_coverage_weight = args.reward_coverage_weight
+    if requested_coverage_weight is None:
+        requested_coverage_weight = args.reward_search_weight
+
     cfg = Config()
     if args.steps is not None:
         cfg.episode_steps = args.steps
     if args.device is not None:
         cfg.device = args.device
+    if args.target_speed is not None:
+        cfg.target_speed = args.target_speed
+    if args.target_velocity_noise_std is not None:
+        cfg.target_velocity_noise_std = args.target_velocity_noise_std
+    if requested_coverage_weight is not None:
+        cfg.reward_search_weight = requested_coverage_weight
     for key in [
         "graph_type",
         "prm_random_nodes",
@@ -452,6 +479,9 @@ def main() -> None:
             "device": str(device),
             "steps": int(cfg.episode_steps),
             "n_targets": int(args.n_targets or cfg.n_targets_true),
+            "target_speed": float(cfg.target_speed),
+            "target_velocity_noise_std": float(cfg.target_velocity_noise_std),
+            "reward_coverage_weight": float(cfg.reward_search_weight),
             "greedy": greedy,
             "policy_mode": policy_mode,
         }

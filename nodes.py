@@ -24,6 +24,7 @@ class NodeBatch:
 @dataclass
 class GlobalGraphBatch:
     global_node_inputs: np.ndarray
+    spatio_pos_encoding: np.ndarray
     global_edge_mask: np.ndarray
     global_node_padding_mask: np.ndarray
     current_node_indices: np.ndarray
@@ -157,6 +158,10 @@ class NodeBuilder:
             self._last_update_step = step
         return GlobalGraphBatch(
             global_node_inputs=self._global_node_inputs(uav_positions, target_belief, search_belief),
+            spatio_pos_encoding=np.broadcast_to(
+                self.graph.laplacian_positional_encoding(self.cfg.graph_laplacian_pe_dim)[None, :, :],
+                (self.cfg.n_uavs, self.graph.n_nodes, self.cfg.graph_laplacian_pe_dim),
+            ).copy(),
             global_edge_mask=self.graph.edge_mask(),
             global_node_padding_mask=self.graph.node_padding_mask(),
             current_node_indices=np.asarray([self.graph.nearest_node_index(pos) for pos in uav_positions], dtype=np.int64),

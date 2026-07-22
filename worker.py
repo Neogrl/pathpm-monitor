@@ -162,6 +162,7 @@ class RolloutWorker:
             obs.update(
                 {
                     "global_node_inputs": global_batch.global_node_inputs.astype(np.float32),
+                    "spatio_pos_encoding": global_batch.spatio_pos_encoding.astype(np.float32),
                     "global_edge_mask": global_batch.global_edge_mask.astype(bool),
                     "global_node_padding_mask": global_batch.global_node_padding_mask.astype(bool),
                     "current_node_indices": global_batch.current_node_indices.astype(np.int64),
@@ -176,6 +177,7 @@ class RolloutWorker:
     def _to_torch(self, obs: dict, batch_dim: bool = False) -> dict[str, torch.Tensor]:
         keys = [
             "global_node_inputs",
+            "spatio_pos_encoding",
             "global_edge_mask",
             "global_node_padding_mask",
             "current_node_indices",
@@ -355,6 +357,7 @@ class RolloutWorker:
                     "node_padding_mask": obs["node_padding_mask"],
                     "action_mask": obs["action_mask"],
                     "global_node_inputs": obs["global_node_inputs"],
+                    "spatio_pos_encoding": obs["spatio_pos_encoding"],
                     "global_edge_mask": obs["global_edge_mask"],
                     "global_node_padding_mask": obs["global_node_padding_mask"],
                     "current_node_indices": obs["current_node_indices"],

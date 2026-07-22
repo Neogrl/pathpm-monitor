@@ -279,6 +279,12 @@ class GlobalNodeGraph:
         try:
             _, eigenvectors = np.linalg.eigh(laplacian.astype(np.float64))
             pe = eigenvectors[:, 1 : dim + 1].astype(np.float32)
+            # Eigenvector signs are arbitrary. Canonicalize them so the same
+            # graph cannot produce an equivalent but sign-flipped input.
+            for column in range(pe.shape[1]):
+                pivot = int(np.argmax(np.abs(pe[:, column])))
+                if pe[pivot, column] < 0.0:
+                    pe[:, column] *= -1.0
         except np.linalg.LinAlgError:
             pe = np.zeros((self.n_nodes, min(dim, max(self.n_nodes - 1, 0))), dtype=np.float32)
         if pe.shape[1] < dim:

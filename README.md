@@ -30,9 +30,9 @@ Formal PPO training:
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k --episodes-per-collection 16 --rollout-backend ray --rollout-workers 8 --rollout-cpus-per-worker 1 --rollout-gpus-per-worker 0 --worker-num-threads 1 --rollout-device cpu --ppo-minibatch-size 256 --ppo-update-epochs 4 --log-interval 10 --checkpoint-episode-interval 100 --device cuda
 ```
 
-The active training baseline is MAPPO stage 1: simultaneous joint action sampling, shared-belief actor input, a separate centralized graph value branch, available-action masking, GAE with bootstrapped next values, PPO policy clipping, clipped Huber value loss, and large on-policy minibatches by default. Defaults include `episodes_per_collection=16`, `ppo_num_minibatches=1`, `actor_lr=1e-4`, `critic_lr=1e-4`, `adam_eps=1e-5`, `ppo_update_epochs=5`, `ppo_clip_coef=0.2`, `ppo_value_coef=0.2`, `ppo_entropy_coef=0.005`, `reward_overlap_weight=-0.2`, and `ppo_max_grad_norm=5`. `gae_lambda` remains `0.95` because CMUOMMT has delayed discovery and maintenance rewards.
+The active training baseline is MAPPO stage 1: simultaneous joint action sampling, shared-belief actor input, a separate centralized graph value branch, available-action masking, GAE with bootstrapped next values, PPO policy clipping, and clipped Huber value loss. The shared actor adds a learned UAV-ID embedding to its policy query so agents at the same node do not receive identical deterministic policies. The centralized critic remains permutation-invariant and does not use the ID embedding.
 
-Training-time evaluation is disabled by default (`eval_interval=0`, `eval_episodes=0`) to match STAMP-style throughput. Use `evaluate.py` for fixed-seed validation and final reporting. Rollout collection uses STAMP-style persistent Ray actors by default (`rollout_backend=ray`, `rollout_workers=8`, `rollout_cpus_per_worker=1`, `rollout_gpus_per_worker=0`, `worker_num_threads=1`, `rollout_device=cpu`), while PPO updates run on `device`. The process-pool backend remains available as a fallback with `--rollout-backend process`.
+Lightweight training-time validation runs every 20 collections with 5 fixed-seed episodes by default. `best.pt` is updated only on these validation collections and uses `val_observation_rate`, the target-time fraction that was actually observed. Rollout collection uses STAMP-style persistent Ray actors by default (`rollout_backend=ray`, `rollout_workers=8`, `rollout_cpus_per_worker=1`, `rollout_gpus_per_worker=0`, `worker_num_threads=1`, `rollout_device=cpu`), while PPO updates run on `device`.
 
 Training logs:
 
@@ -41,19 +41,19 @@ tensorboard --logdir training_output\ppo_formal_5k\tensorboard
 & 'C:\Users\15193\.conda\envs\pathpm\python.exe' train.py --updates 5000 --steps 256 --seed 10 --run-name ppo_formal_5k_wandb --wandb
 ```
 
-Console output is mirrored to `training_output/<run_name>/train.log` by default. Use `--log-file custom.log` to choose another filename. TensorBoard is enabled by default and writes to `training_output/<run_name>/tensorboard`. Use `--no-tensorboard` to disable it. W&B is disabled by default and enabled with `--wandb`.
+Console output is mirrored to `training_output/<run_name>/train.log` by default. Use `--log-file custom.log` to choose another filename. TensorBoard writes only five explicit groups: `01_Train`, `02_Validation`, `03_Optimization`, `04_PHD`, and `05_Performance`. Candidate-level diagnostics and seeds remain in CSV/JSON but are not sent to TensorBoard. Use `--no-tensorboard` to disable it.
 
 A collection is one rollout batch: the trainer collects `episodes_per_collection` episodes with the current policy, merges them into one rollout buffer, and then runs one PPO update phase. `--log-interval` is counted in these outer collection iterations. It controls how often `training_metrics.csv` and `training_summary.json` are flushed; TensorBoard and `train.log` are still updated every collection. TensorBoard and W&B scalar x-axes use cumulative `episode_count`, while `update` in CSV/JSON remains the cumulative optimizer-step count.
 
-Weights are saved in three ways: `latest.pt` is overwritten after every collection, `best.pt` is updated whenever `best_metric` improves, and numbered checkpoints are saved by cumulative episode count with `--checkpoint-episode-interval` such as every 100 episodes. `--save-interval` is kept only as a deprecated alias for `--checkpoint-episode-interval`.
+Weights are saved in three ways: `latest.pt` is overwritten after every collection, `best.pt` is updated only when validation `observation_rate` improves, and numbered checkpoints are saved by cumulative episode count with `--checkpoint-episode-interval`. `--save-interval` remains a deprecated alias.
 
-The optimized reward uses only the main task terms:
+The stage-1 maintenance reward is:
 
 ```text
-reward = observe + discover + 0.5 * continuity + 0.3 * search - 0.5 * miss
+reward = visibility - 0.5 * maintenance_age + 8.0 * coverage_progress - 0.5 * duplicate_coverage
 ```
 
-Fairness, overlap, movement cost, and option switch rate are recorded as diagnostics but do not affect the current PPO objective.
+The coverage term keeps global search active without dominating visibility. Duplicate target coverage is penalized strongly enough to discourage multiple UAVs from maintaining the same target.
 
 Baselines:
 
